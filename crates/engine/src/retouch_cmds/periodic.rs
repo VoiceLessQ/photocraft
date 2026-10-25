@@ -23,6 +23,31 @@ pub(super) fn project(rect: Rect, tile: Rect) -> Vec<Rect> {
     ys.into_iter().flat_map(|(y0, y1)| xs.iter().map(move |&(x0, x1)| Rect::new(x0, y0, x1, y1))).collect()
 }
 
+/// A composite tool's stroke wrapped around the document: `paint` gives the pixels for a
+/// rectangle in the stroke's own coordinates, from the target as it was before the stroke, and
+/// they go on through the stroke's coverage wherever it repeats on the document.
+pub(super) fn stroke(
+    pre: &Document,
+    target: &mut Surface,
+    stroke: &Stroke,
+    selection: Option<&Surface>,
+    lock: bool,
+    mode: BlendMode,
+    mut paint: impl FnMut(&Surface, Rect) -> Result<Region>,
+) -> Result<Rect> {
+    let mut renderer = photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0);
+    renderer.push(&stroke.points);
+    renderer.finish();
+    let before = target.clone();
+    let bounds = renderer.bounds();
+    Composite { target, before: &before, tile: pre.bounds(), opacity: stroke.brush.opacity, selection, lock, mode }.draw(
+        bounds,
+        &stroke.brush,
+        &stroke.points,
+        |r| paint(&before, r),
+    )
+}
+
 /// Composite periodic copies of one stroke, restoring each dirty patch from pre-stroke pixels.
 /// Each dab wraps once, then builds flow towards its opacity ceiling. Stroke opacity and
 /// selection are applied once after all dabs, including repeated visits through other tiles.
