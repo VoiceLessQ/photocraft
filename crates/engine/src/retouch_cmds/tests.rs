@@ -2604,6 +2604,51 @@ fn a_wrapped_dab_bigger_than_the_canvas_stays_on_it() {
 }
 
 #[test]
+fn spot_healing_with_nothing_left_to_sample_leaves_the_layer_alone() {
+    // Wrapped, the dab covers all of a canvas smaller than it, so its window has no pixel left
+    // to heal from.
+    for depth in DEPTHS {
+        for kind in ["contentAware", "createTexture", "proximityMatch"] {
+            let mut s = session(48, 36, depth, "rgb");
+            textured(&mut s);
+            let before = layer_pixels(&s);
+            let r = s.execute("paint.spotHealing", json!({"points": [[48, 36]], "size": 64, "hardness": 100, "type": kind, "wrap": true})).unwrap();
+            assert_eq!(layer_pixels(&s), before, "{kind} at {depth}-bit");
+            assert_eq!(r["damage"][2].as_i64().unwrap() * r["damage"][3].as_i64().unwrap(), 0, "{kind} at {depth}-bit: no damage, got {}", r["damage"]);
+        }
+    }
+}
+
+#[test]
+fn a_wrapped_dodge_or_burn_stroke_tones_each_pixel_once() {
+    // A stroke round the canvas, or a dab bigger than it, comes back to pixels one canvas away;
+    // the stroke still tones each of them once, as a single dab does.
+    for depth in DEPTHS {
+        for cmd in ["paint.dodge", "paint.burn"] {
+            let run = |w: u32, h: u32, mut p: Value| {
+                let mut s = session(w, h, depth, "rgb");
+                paint_layer(&mut s, |_, _| [0.5, 0.5, 0.5, 1.0]);
+                p["exposure"] = json!(60);
+                s.execute(cmd, p).unwrap();
+                layer_pixels(&s)
+            };
+            let once = run(WRAP.0, WRAP.1, json!({"points": [[24, 18]], "size": 10, "hardness": 100}));
+            let n = once.len() / (WRAP.0 * WRAP.1) as usize;
+            let toned = &once[(18 * WRAP.0 as usize + 24) * n..][..n];
+            assert_ne!(toned, &once[..n], "{cmd} at {depth}-bit: the dab tones");
+            let round = run(WRAP.0, WRAP.1, json!({"points": [[2, 18], [122, 18]], "size": 10, "hardness": 100, "wrap": true}));
+            for x in 0..WRAP.0 as usize {
+                assert_eq!(&round[(18 * WRAP.0 as usize + x) * n..][..n], toned, "{cmd} at {depth}-bit: ({x}, 18)");
+            }
+            let big = run(16, 12, json!({"points": [[8, 6], [30, 20]], "size": 60, "hardness": 100, "wrap": true}));
+            for (i, px) in big.chunks(n).enumerate() {
+                assert_eq!(px, toned, "{cmd} at {depth}-bit: pixel {i} under the big dab");
+            }
+        }
+    }
+}
+
+#[test]
 fn wrapped_live_strokes_show_what_their_commits_paint() {
     // Across the left and bottom edges, as the canvas draws them: Dodge … Smudge commit the
     // pixels they drew; the strokes that preview their finishing dabs show their commit's.
