@@ -4,6 +4,8 @@
 //!   library as one group named after the file, with the file's own folders nested inside it
 //!   as Photoshop does (Brushes panel › Import Brushes…, Preset Manager). Parsing lives in
 //!   `photocraft-psd` (`abr`), the mapping onto [`BrushSettings`] in `photocraft-io` (`abr_map`).
+//! - `brush.presets.importProcreate` does the same for Procreate's `.brush` and `.brushset`
+//!   files (`photocraft-io`'s `procreate`), for people bringing their brushes over.
 //! - `brush.presets.importImage` turns an image file (anything File › Open reads: PNG, JPEG,
 //!   TIFF, PSD…) into a sampled-tip brush preset, as Edit › Define Brush Preset does with a
 //!   selection: dark pixels paint, white and transparent ones don't (TOOL-213-12).
@@ -117,14 +119,16 @@ fn import_abr(s: &mut Session, p: &Value) -> Result<Value> {
     )
 }
 
-fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photocraft_io::abr_map::AbrImport) -> Result<Value> {
+/// Add imported `presets` as `group` under names not in use: a group of the same name is
+/// replaced unless `replace` is false, and `select` makes the first one current. Their names.
+fn add_presets(s: &mut Session, p: &Value, cmd: &str, group: &str, presets: Vec<photocraft_paint::BrushPreset>) -> Result<Vec<String>> {
     // Re-importing a file replaces its group instead of duplicating it.
     if p.get("replace").and_then(Value::as_bool).unwrap_or(true) {
         s.tools.presets.retain(|x| x.builtin || x.group != group);
     }
     let mut taken = UniqueNames::new(s.tools.presets.iter().map(|x| x.name.as_str()));
-    let mut names = Vec::with_capacity(imp.presets.len());
-    for mut preset in imp.presets {
+    let mut names = Vec::with_capacity(presets.len());
+    for mut preset in presets {
         preset.name = taken.unique(&preset.name);
         names.push(preset.name.clone());
         s.tools.presets.push(preset);
@@ -135,15 +139,55 @@ fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photocraft_io
         && let Some(pr) = photocraft_paint::presets::find(&s.tools.presets, first)
     {
         let mut b = pr.brush.clone().picked_over(&s.tools.brush);
-        s.load_brush_tips(&mut b).map_err(|e| bad("brush.presets.importAbr", e))?;
+        s.load_brush_tips(&mut b).map_err(|e| bad(cmd, e))?;
         s.tools.brush = b;
         s.tools.brush_changed();
     }
+    Ok(names)
+}
+
+fn add_abr_presets(s: &mut Session, p: &Value, group: String, imp: photocraft_io::abr_map::AbrImport) -> Result<Value> {
+    let names = add_presets(s, p, "brush.presets.importAbr", &group, imp.presets)?;
     // Distinct folder paths the file brought (its Photoshop folders, nested inside `group`).
     let folders: std::collections::BTreeSet<&[String]> =
         s.tools.presets.iter().filter(|x| !x.builtin && x.group == group).flat_map(|x| (1..=x.folder.len()).filter_map(|d| x.folder.get(..d))).collect();
     let folders = folders.len();
     Ok(json!({ "group": group, "imported": names, "count": names.len(), "folders": folders, "version": imp.version, "warnings": imp.warnings }))
+}
+
+fn import_procreate(s: &mut Session, p: &Value) -> Result<Value> {
+    let cmd = "brush.presets.importProcreate";
+    // A background job, as for `.abr`: sets of large shapes take a while to decode.
+    let params = p.clone();
+    let params_apply = json!({ "replace": p.get("replace"), "select": p.get("select") });
+    crate::jobs::run(
+        s,
+        "Import Procreate Brushes",
+        false,
+        move |ctx| {
+            ctx.progress(0.0, "Importing brushes");
+            let p = &params;
+            let (bytes, stem) = file_bytes(p, cmd, ".brush or .brushset file")?;
+            let group = match p.get("group") {
+                Some(v) => Some(v.as_str().map(str::trim).filter(|g| !g.is_empty()).ok_or_else(|| bad(cmd, "`group` must be a non-empty string"))?.to_string()),
+                None => Some(stem).filter(|s| !s.is_empty()),
+            };
+            ctx.check()?;
+            let mut imp = ctx
+                .stage(0.05, 1.0, "Importing brushes", |ctl| photocraft_io::procreate::read_procreate_with(&bytes, "", ctl))
+                .map_err(|e| if ctx.cancelled() { EngineError::Cancelled } else { bad(cmd, e) })?;
+            // Data without a file name: the set's own name, if it has one.
+            let group = group.or_else(|| imp.set_name.clone().filter(|n| !n.trim().is_empty())).unwrap_or_else(|| "Procreate Brushes".to_string());
+            for preset in &mut imp.presets {
+                preset.group.clone_from(&group);
+            }
+            Ok((group, imp))
+        },
+        move |s, (group, imp)| {
+            let names = add_presets(s, &params_apply, cmd, &group, imp.presets)?;
+            Ok(json!({ "group": group, "imported": names, "count": names.len(), "warnings": imp.warnings }))
+        },
+    )
 }
 
 /// Largest canvas (268 MP) a brush may be made from.
@@ -246,6 +290,16 @@ pub fn specs() -> Vec<CommandSpec> {
             params: r##"{"path":".abr file"?,"data":base64 bytes?,"group":string?=file name,"replace":bool=true (replace a group of the same name),"select":bool=false (make the first imported preset current)} → {group, imported, count, folders (nested folders kept from the file), version, warnings}"##,
             enabled: always,
             run: import_abr,
+            journal: true,
+        },
+        CommandSpec {
+            id: "brush.presets.importProcreate",
+            label: "Import Procreate Brushes…",
+            menu: &[],
+            shortcut: None,
+            params: r##"{"path":".brush or .brushset file"?,"data":base64 bytes?,"group":string?=file name (with data: the set's name),"replace":bool=true (replace a group of the same name),"select":bool=false (make the first imported preset current)} → {group, imported, count, warnings (missing parts and Procreate settings left out)}"##,
+            enabled: always,
+            run: import_procreate,
             journal: true,
         },
         CommandSpec {
@@ -446,6 +500,63 @@ mod tests {
             assert!(s.execute("brush.presets.importAbr", p.clone()).is_err(), "{p}");
         }
         assert_eq!(s.tools.presets.len(), n);
+    }
+
+    /// A `.brushset` named "Cat's Basics" with two brushes on a white-disc shape.
+    fn procreate_set() -> Vec<u8> {
+        use photocraft_io::procreate::{Field, write_archive, write_brushset};
+        let disc: Vec<u8> = (0..16 * 16).map(|i: i32| if (i % 16 - 8).pow(2) + (i / 16 - 8).pow(2) < 30 { 255 } else { 0 }).collect();
+        let img = photocraft_codecs::Image::from_u8(16, 16, photocraft_codecs::ChannelLayout::Gray, disc).unwrap();
+        let shape = photocraft_codecs::encode(&img, photocraft_codecs::Format::Png, &Default::default()).unwrap();
+        let brush = |name: &str| write_archive(&[("name", Field::Text(name.into())), ("paintSize", Field::Num(0.02)), ("plotSpacing", Field::Num(0.1))]);
+        write_brushset("Cat's Basics", &[(brush("Soft Ink"), Some(shape.clone()), None), (brush("Hard Round"), Some(shape), None)])
+    }
+
+    #[test]
+    fn procreate_import_adds_a_group_and_paints() {
+        let mut s = Session::new();
+        let before = s.tools.presets.len();
+        let data = photocraft_paint::tile::b64_encode(&procreate_set());
+        let r = s.execute("brush.presets.importProcreate", json!({"data": data, "select": true})).unwrap();
+        assert_eq!(r["group"], "Cat's Basics", "bytes without a file name take the set's name");
+        // The name clashing with the built-in Hard Round is made unique.
+        assert_eq!(r["imported"], json!(["Soft Ink", "Hard Round 2"]));
+        assert_eq!(s.tools.presets.len(), before + 2);
+        assert!(matches!(s.tools.brush.tip, photocraft_paint::TipShape::Sampled(_)), "the first brush is current");
+        assert!((s.tools.brush.size - 20.0).abs() < 1e-3);
+        // Re-import replaces the group.
+        s.execute("brush.presets.importProcreate", json!({"data": data})).unwrap();
+        assert_eq!(s.tools.presets.len(), before + 2);
+        s.execute("file.new", json!({"width": 64, "height": 64})).unwrap();
+        s.execute("paint.stroke", json!({"points": [[5, 30], [60, 30]], "preset": "Soft Ink"})).unwrap();
+        // From a file on disk, the group is the file's name.
+        let path = std::env::temp_dir().join(format!("pc-procreate-{}.brushset", std::process::id()));
+        std::fs::write(&path, procreate_set()).unwrap();
+        let r = s.execute("brush.presets.importProcreate", json!({"path": path.to_string_lossy()}));
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(r.unwrap()["group"], format!("pc-procreate-{}", std::process::id()));
+    }
+
+    #[test]
+    fn procreate_import_fails_cleanly() {
+        let mut s = Session::new();
+        let n = s.tools.presets.len();
+        let set = procreate_set();
+        for p in [
+            json!({}),
+            json!({"path": ""}),
+            json!({"path": "/nonexistent/brushes.brushset"}),
+            json!({"data": 42}),
+            json!({"data": "%%%not base64"}),
+            json!({"data": ""}),
+            json!({"data": photocraft_paint::tile::b64_encode(b"PK\x03\x04junk")}),
+            json!({"data": photocraft_paint::tile::b64_encode(&set), "group": 5}),
+            json!({"data": photocraft_paint::tile::b64_encode(&set), "group": "  "}),
+            json!({"data": photocraft_paint::tile::b64_encode(&set[..set.len() / 2])}),
+        ] {
+            assert!(s.execute("brush.presets.importProcreate", p.clone()).is_err(), "{p}");
+        }
+        assert_eq!(s.tools.presets.len(), n, "a failed import adds nothing");
     }
 
     #[test]
