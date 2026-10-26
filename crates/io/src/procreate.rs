@@ -39,7 +39,7 @@ pub const SIZE_SCALE: f32 = 1000.0;
 const MAX_ARCHIVE: usize = 8 << 20;
 const MAX_SET_PLIST: usize = 1 << 20;
 const MAX_IMAGE_FILE: usize = 64 << 20;
-const IMAGE_LIMITS: Limits = Limits { max_width: 8192, max_height: 8192, max_pixels: 1 << 26, max_alloc: 256 << 20 };
+const IMAGE_LIMITS: Limits = Limits { max_width: 8192, max_height: 8192, max_pixels: 1 << 24, max_alloc: 128 << 20 };
 /// Tip and texture bytes one import keeps (16-bit samples); later brushes are left out.
 const MAX_KEPT_BYTES: usize = if cfg!(target_pointer_width = "64") { 1 << 30 } else { 256 << 20 };
 /// Unreadable brushes reported one by one; the rest are counted.
@@ -155,6 +155,10 @@ fn brush_dirs(zip: &ZipReader, out: &mut ProcreateImport) -> Vec<String> {
 /// `brushset.plist`: the set's name and its brush folders in order.
 fn set_plist(bytes: &[u8]) -> Result<(Option<String>, Vec<String>), String> {
     let text = std::str::from_utf8(bytes).map_err(|_| "not UTF-8")?;
+    // Procreate's DOCTYPE declares nothing; declared entities could expand far past the file's size.
+    if text.contains("<!ENTITY") {
+        return Err("entity declarations are not allowed".into());
+    }
     let opts = roxmltree::ParsingOptions { allow_dtd: true, ..Default::default() };
     let doc = roxmltree::Document::parse_with_options(text, opts).map_err(|e| e.to_string())?;
     let dict = doc.root_element().children().find(|n| n.has_tag_name("dict")).ok_or("no dict")?;
@@ -382,16 +386,17 @@ fn settings(a: &Archive, unmapped: &mut BTreeSet<&'static str>) -> BrushSettings
     b
 }
 
-/// Each pixel's luminance (Rec. 601) and alpha.
-fn luma_alpha(img: &Image) -> Result<Vec<(f32, f32)>, String> {
+/// `f(luminance, alpha)` for each pixel (Rec. 601 luminance), in one pass.
+fn luma_alpha(img: &Image, f: impl Fn(f32, f32) -> f32) -> Result<Vec<f32>, String> {
     let (layout, n) = (img.layout(), img.pixel_count());
     let ch = layout.channels();
     let s = |p: usize, c: usize| img.sample_normalized(p * ch + c);
+    let luma = |p: usize| 0.299 * s(p, 0) + 0.587 * s(p, 1) + 0.114 * s(p, 2);
     Ok(match layout {
-        ChannelLayout::Gray => (0..n).map(|p| (s(p, 0), 1.0)).collect(),
-        ChannelLayout::GrayA => (0..n).map(|p| (s(p, 0), s(p, 1))).collect(),
-        ChannelLayout::Rgb => (0..n).map(|p| (0.299 * s(p, 0) + 0.587 * s(p, 1) + 0.114 * s(p, 2), 1.0)).collect(),
-        ChannelLayout::Rgba => (0..n).map(|p| (0.299 * s(p, 0) + 0.587 * s(p, 1) + 0.114 * s(p, 2), s(p, 3))).collect(),
+        ChannelLayout::Gray => (0..n).map(|p| f(s(p, 0), 1.0)).collect(),
+        ChannelLayout::GrayA => (0..n).map(|p| f(s(p, 0), s(p, 1))).collect(),
+        ChannelLayout::Rgb => (0..n).map(|p| f(luma(p), 1.0)).collect(),
+        ChannelLayout::Rgba => (0..n).map(|p| f(luma(p), s(p, 3))).collect(),
         _ => return Err("the image is not grayscale or RGB".into()),
     })
 }
@@ -430,8 +435,10 @@ impl Mapper<'_> {
         match self.image(dir, "Shape.png")? {
             Some(img) => {
                 let invert = a.flag("shapeInverted");
-                let v: Vec<f32> = luma_alpha(&img)?.into_iter().map(|(l, al)| (if invert { 1.0 - l } else { l }) * al).collect();
-                let (w, h, v) = fit(img.width(), img.height(), v, MAX_TIP_EDGE);
+                let v = luma_alpha(&img, |l, al| (if invert { 1.0 - l } else { l }) * al)?;
+                let (iw, ih) = (img.width(), img.height());
+                drop(img);
+                let (w, h, v) = fit(iw, ih, v, MAX_TIP_EDGE);
                 if !self.keep(w, h) {
                     return Ok(None);
                 }
@@ -445,8 +452,10 @@ impl Mapper<'_> {
         match self.image(dir, "Grain.png") {
             Ok(Some(img)) => {
                 // Transparent grain lets paint through, like white.
-                let v: Vec<f32> = luma_alpha(&img)?.into_iter().map(|(l, al)| l * al + 1.0 - al).collect();
-                let (w, h, v) = fit(img.width(), img.height(), v, MAX_PATTERN_EDGE);
+                let v = luma_alpha(&img, |l, al| l * al + 1.0 - al)?;
+                let (iw, ih) = (img.width(), img.height());
+                drop(img);
+                let (w, h, v) = fit(iw, ih, v, MAX_PATTERN_EDGE);
                 if !self.keep(w, h) {
                     return Ok(None);
                 }
@@ -457,7 +466,7 @@ impl Mapper<'_> {
                 t.pattern = Pattern::Tile(tile(w, h, &v));
                 t.invert = a.flag("textureInverted");
                 // A grain downsampled to fit keeps its size on the canvas.
-                t.scale = (a.num("textureScale").unwrap_or(1.0) * img.width() as f32 / w as f32).clamp(0.01, 10.0);
+                t.scale = (a.num("textureScale").unwrap_or(1.0) * iw as f32 / w as f32).clamp(0.01, 10.0);
                 t.depth = a.num("grainDepth").unwrap_or(1.0).clamp(0.0, 1.0);
                 // Brightness is in levels of 255 (a Photoshop brush's -30 comes in as -30/255),
                 // ours in units of 150 levels.

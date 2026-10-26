@@ -228,6 +228,24 @@ fn sets_follow_their_plist_and_skip_reset_copies() {
 }
 
 #[test]
+fn a_plist_declaring_entities_is_refused() {
+    // Declared entities could expand far past the file's size, so any declaration is refused.
+    let mut dtd = String::from("<!ENTITY e0 \"lol\">");
+    for i in 1..10 {
+        dtd += &format!("<!ENTITY e{i} \"{}\">", format!("&e{};", i - 1).repeat(10));
+    }
+    let plist = format!("<?xml version=\"1.0\"?><!DOCTYPE plist [{dtd}]><plist><dict><key>name</key><string>&e9;&e9;</string></dict></plist>");
+    let mut z = ZipWriter::new();
+    z.add("brushset.plist", plist.as_bytes()).unwrap();
+    z.add("A/Brush.archive", &write_archive(&[("name", text("Ay"))])).unwrap();
+    z.add("A/Shape.png", &bar()).unwrap();
+    let imp = read_procreate(&z.finish().unwrap(), "g").unwrap();
+    assert_eq!(imp.presets.iter().map(|p| p.name.as_str()).collect::<Vec<_>>(), ["Ay"]);
+    assert!(imp.set_name.is_none());
+    assert!(imp.warnings[0].contains("entity declarations are not allowed"), "{:?}", imp.warnings);
+}
+
+#[test]
 fn missing_and_built_in_parts_are_reported() {
     let archive = write_archive(&[("name", text("Builtin")), ("bundledShapePath", text("Shape-Hard.png")), ("bundledGrainPath", text("Grain-Paper.png"))]);
     let imp = read_procreate(&brush_zip(&archive, None, None), "g").unwrap();
