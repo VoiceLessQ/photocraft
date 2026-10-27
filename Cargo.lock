@@ -6108,6 +6108,7 @@ dependencies = [
  "photocraft-raw",
  "photocraft-testkit",
  "photocraft-text",
+ "photocraft-vcs",
  "photocraft-vector",
  "rayon",
  "roxmltree 0.21.1",

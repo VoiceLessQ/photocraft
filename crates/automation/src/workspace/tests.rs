@@ -260,6 +260,10 @@ fn filesystem_commands_fail_closed() {
         "measurementLog.export",
         "layer.videoLayers.reloadFrame",
         "edit.colorSettings",
+        // Versions write beside the document's path, outside any authorized root.
+        "file.versions.save",
+        "file.versions.list",
+        "file.versions.restore",
     ] {
         assert!(authorize_engine_command(id, &serde_json::json!({})).is_err());
     }

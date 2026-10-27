@@ -149,6 +149,7 @@ pub mod type_spell_cmds;
 pub mod type_styles_cmds;
 pub mod updates_cmds;
 pub(super) mod variables_cmds;
+pub(super) mod vcs_cmds;
 pub mod vector_cmds;
 pub(super) mod video_cmds;
 pub mod vp_cmds;
@@ -1294,6 +1295,7 @@ fn build() -> Vec<CommandSpec> {
     v.extend(crate::video_cmds::specs());
     v.extend(crate::jobs::specs());
     v.extend(crate::wia_cmds::specs());
+    v.extend(crate::vcs_cmds::specs());
     v.extend(crate::rasterize_style_cmds::specs());
     v.extend(crate::variables_cmds::specs());
     v.extend(crate::plugin_cmds::specs());
