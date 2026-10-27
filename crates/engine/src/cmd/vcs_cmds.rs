@@ -51,7 +51,13 @@ fn stage(s: &Session, h: &History, name: &str) -> Result<()> {
 }
 
 fn version_json(v: &photocraft_vcs::Version) -> Value {
-    json!({"id": v.id, "message": v.message, "time": v.time})
+    // UTC: the engine has no time-zone database; the panel shows recent versions as "5 minutes ago".
+    // The web build has no chrono, and no versions either.
+    #[cfg(not(target_arch = "wasm32"))]
+    let date = chrono::DateTime::from_timestamp(v.time, 0).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string());
+    #[cfg(target_arch = "wasm32")]
+    let date: Option<String> = None;
+    json!({"id": v.id, "message": v.message, "time": v.time, "date": date})
 }
 
 fn save(s: &mut Session, p: &Value) -> Result<Value> {
@@ -140,7 +146,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Versions",
             menu: &[],
             shortcut: None,
-            params: r#"{"limit":int=50} → {versions:[{id, message, time}], history}: the open document's versions, newest first (time in Unix seconds)"#,
+            params: r#"{"limit":int=50} → {versions:[{id, message, time, date}], history}: the open document's versions, newest first (time in Unix seconds, date in UTC)"#,
             enabled: can_version,
             journal: false,
             run: list,

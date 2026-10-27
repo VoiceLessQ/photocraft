@@ -219,6 +219,7 @@ use panels::timeline_ui;
 use panels::titlebar;
 pub use panels::type_panels_ui;
 use panels::variables_ui;
+pub use panels::versions_ui;
 pub use prefs::flick_pan;
 pub use prefs::kys_import;
 pub use prefs::prefs_ui;

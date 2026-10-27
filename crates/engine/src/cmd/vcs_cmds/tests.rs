@@ -53,6 +53,7 @@ fn save_and_list_versions() {
     let listed = s.execute("file.versions.list", json!({"limit": 1})).unwrap();
     assert_eq!(listed["versions"].as_array().unwrap().len(), 1);
     assert!(listed["history"].as_str().unwrap().ends_with(".photocraft-versions"));
+    assert!(listed["versions"][0]["date"].as_str().unwrap().ends_with(" UTC"));
     assert!(dir.path().join(".photocraft-versions").join("history.git").is_dir());
 }
 

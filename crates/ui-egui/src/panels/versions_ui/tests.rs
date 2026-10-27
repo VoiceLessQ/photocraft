@@ -1,0 +1,156 @@
+use egui_kittest::{Harness, kittest::Queryable};
+use serde_json::json;
+
+use super::{Row, TAB, rows, when};
+use crate::PhotocraftApp;
+
+fn row(time: i64) -> Row {
+    Row { id: "a".repeat(40), message: "m".into(), time, date: "2026-01-02 03:04 UTC".into() }
+}
+
+#[test]
+fn times_read_as_ago_then_as_a_date() {
+    let now = Some(1_000_000);
+    assert_eq!(when(&row(1_000_000), now), "just now");
+    assert_eq!(when(&row(1_000_000 - 59), now), "just now");
+    assert_eq!(when(&row(1_000_000 - 60), now), "1 minute ago");
+    assert_eq!(when(&row(1_000_000 - 3_599), now), "59 minutes ago");
+    assert_eq!(when(&row(1_000_000 - 7_200), now), "2 hours ago");
+    assert_eq!(when(&row(1_000_000 - 86_400), now), "1 day ago");
+    assert_eq!(when(&row(1_000_000 - 604_800), now), "2026-01-02 03:04 UTC");
+    // A clock set back, or no clock at all, shows the date instead of a negative age.
+    assert_eq!(when(&row(1_000_100), now), "2026-01-02 03:04 UTC");
+    assert_eq!(when(&row(0), None), "2026-01-02 03:04 UTC");
+    assert_eq!(when(&row(i64::MIN), now), "2026-01-02 03:04 UTC");
+}
+
+#[test]
+fn rows_skip_entries_without_an_id() {
+    let v = json!({"versions": [{"id": "b", "message": "x", "time": 5, "date": "d"}, {"message": "no id"}, 7, null]});
+    assert_eq!(rows(&v), vec![Row { id: "b".into(), message: "x".into(), time: 5, date: "d".into() }]);
+    assert!(rows(&json!({})).is_empty());
+    assert!(rows(&json!({"versions": "nope"})).is_empty());
+}
+
+fn harness(app: PhotocraftApp, panel: bool) -> Harness<'static, PhotocraftApp> {
+    let mut h = Harness::builder().with_size(egui::vec2(420.0, 480.0)).build_ui_state(
+        move |ui, app: &mut PhotocraftApp| {
+            if ui.ctx().fonts(|f| f.families().contains(&egui::FontFamily::Name("medium".into()))) {
+                if panel {
+                    super::panel(app, ui);
+                } else {
+                    crate::panels::status_bar(app, ui);
+                }
+            }
+        },
+        app,
+    );
+    PhotocraftApp::setup_context(&h.ctx, crate::theme::ThemeKind::default());
+    h.run_steps(3);
+    h
+}
+
+/// An app with one small document whose path is `<dir>/art.pcraft`.
+fn app_with_doc(dir: &std::path::Path) -> PhotocraftApp {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width": 32, "height": 32, "background": "white"})).unwrap();
+    app.session.active_mut().unwrap().path = Some(dir.join("art.pcraft").display().to_string());
+    app.sync_views();
+    app
+}
+
+#[test]
+fn panel_saves_lists_and_restores() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(app_with_doc(dir.path()), true);
+    assert!(h.query_by_label_contains("No versions yet").is_some());
+    h.get_by_label("Save Version").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.status, "Version saved");
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 1);
+    h.state_mut().run("image.adjustments.invert", json!({})).unwrap();
+    h.get_by_label("Save Version").click();
+    h.run_steps(3);
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 2);
+    // Saving again with nothing new says so and adds no row.
+    h.get_by_label("Save Version").click();
+    h.run_steps(3);
+    assert_eq!(h.state().ui.status, "No changes since the last version");
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 2);
+    // The older row is the white original.
+    h.get_all_by_label("Restore this version (Undo brings back what you had)").nth(1).unwrap().click();
+    h.run_steps(3);
+    assert!(h.state().ui.status.starts_with("Restored"), "{}", h.state().ui.status);
+    assert!(!h.state().ui.status_error);
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 3, "the restore is a new version on top");
+}
+
+#[test]
+fn panel_explains_what_it_needs() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    let h = harness(PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default()), true);
+    assert!(h.query_by_label("No document").is_some());
+    app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    app.sync_views();
+    let h = harness(app, true);
+    assert!(h.query_by_label_contains("Save the document once").is_some());
+    assert!(h.query_by_label("Save Version").is_none());
+}
+
+#[test]
+fn status_chip_counts_versions_and_opens_the_panel() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_doc(dir.path());
+    app.run("file.versions.save", json!({})).unwrap();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    app.run("file.versions.save", json!({})).unwrap();
+    app.ui.panels.history = false;
+    let mut h = harness(app, false);
+    h.get_by_label("2 versions").click();
+    h.run_steps(2);
+    assert!(h.state().ui.panels.history);
+    assert_eq!(h.state().ui.dock_tabs.history, TAB);
+}
+
+#[test]
+fn chip_is_hidden_for_unsaved_documents() {
+    let mut app = PhotocraftApp::new(photocraft_engine::Session::new(), crate::Services::default());
+    app.run("file.new", json!({"width": 8, "height": 8})).unwrap();
+    app.sync_views();
+    let h = harness(app, false);
+    assert!(h.query_by_label("Versions").is_none());
+    assert!(h.query_by_label_contains("version").is_none());
+}
+
+#[test]
+fn rows_sit_right_under_the_note_field() {
+    // A right-to-left note row without a fixed height took the whole panel and pushed the list
+    // out of sight, so a click on Restore landed nowhere.
+    let dir = tempfile::tempdir().unwrap();
+    let mut h = harness(app_with_doc(dir.path()), true);
+    h.state_mut().run("file.versions.save", json!({})).unwrap();
+    h.state_mut().run("image.adjustments.invert", json!({})).unwrap();
+    h.state_mut().run("file.versions.save", json!({})).unwrap();
+    super::forget(&h.ctx);
+    h.run_steps(3);
+    let field = h.get_by_label("Version note").rect();
+    let first = h.get_all_by_label("Restore this version (Undo brings back what you had)").map(|n| n.rect()).fold(f32::MAX, |top, r| top.min(r.top()));
+    assert!(first - field.bottom() < 30.0, "note field ends at {}, first row button at {first}", field.bottom());
+    h.get_all_by_label("Restore this version (Undo brings back what you had)").next().unwrap().click();
+    h.run_steps(3);
+    assert!(h.state().ui.status.starts_with("Restored"), "{}", h.state().ui.status);
+}
+
+#[test]
+fn drawing_the_chip_keeps_the_status_line() {
+    // The chip reads the list while the status bar draws; through `app.run` that cleared an error
+    // status (a failed save's message vanished on the next frame).
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_doc(dir.path());
+    app.ui.status = "Couldn't save art.pcraft: disk full".into();
+    app.ui.status_error = true;
+    let h = harness(app, false);
+    assert_eq!(h.state().ui.status, "Couldn't save art.pcraft: disk full");
+    assert!(h.state().ui.status_error);
+    assert!(h.query_by_label("Versions").is_some());
+}

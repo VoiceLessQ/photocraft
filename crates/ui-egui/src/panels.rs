@@ -62,6 +62,7 @@ pub(super) mod titlebar;
 mod toolbar;
 pub mod type_panels_ui;
 pub(super) mod variables_ui;
+pub mod versions_ui;
 
 #[cfg(test)]
 use color::color_field_height;

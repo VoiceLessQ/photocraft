@@ -21,6 +21,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     crate::chrome_ui::status_bar_pro(app, ui);
                     // Background job progress with Cancel, at the far end (#210).
                     ui.with_layout(crate::direction::trailing(), |ui| {
+                        crate::versions_ui::status_chip(app, ui, control_h);
                         crate::jobs_ui::status_progress(app, ui);
                         crate::background_redraw::status(app, ui);
                         crate::chrome_ui::gpu_memory_status(app, ui);
@@ -55,6 +56,7 @@ pub fn status_bar(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
                     ui.label(RichText::new(&app.ui.status).color(if is_err { t.warning } else { t.text_faint }));
                 }
                 ui.with_layout(crate::direction::trailing(), |ui| {
+                    crate::versions_ui::status_chip(app, ui, control_h);
                     if app.session.active().is_some()
                         && !t.pro
                         && widgets::compact_button(ui, tl!("Fit"), control_h).clicked()

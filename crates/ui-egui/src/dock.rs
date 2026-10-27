@@ -110,7 +110,7 @@ impl Group {
             Group::Properties => &["Properties", "Adjustments"],
             Group::Character => &["Character", "Paragraph"],
             Group::Navigator => &["Navigator", "Histogram", "Info"],
-            Group::History => &["History", "Actions", "Layer Comps"],
+            Group::History => &["History", "Actions", "Layer Comps", "Versions"],
             Group::Layers => &["Layers", "Channels", "Paths"],
             Group::Brushes => &["Brushes"],
         }
