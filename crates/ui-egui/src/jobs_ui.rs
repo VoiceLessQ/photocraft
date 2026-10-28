@@ -897,5 +897,4 @@ pub fn bytes(b: &[u8]) -> OpenSource {
 }
 
 #[cfg(test)]
-#[path = "jobs_ui_tests.rs"]
 mod tests;
