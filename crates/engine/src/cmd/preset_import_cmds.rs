@@ -141,6 +141,8 @@ fn add_presets(s: &mut Session, p: &Value, cmd: &str, group: &str, presets: Vec<
         let mut b = pr.brush.clone().picked_over(&s.tools.brush);
         s.load_brush_tips(&mut b).map_err(|e| bad(cmd, e))?;
         s.tools.brush = b;
+        // So Update Brush Preset saves to the imported preset, not the one picked before.
+        s.tools.current_preset = Some(first.clone());
         s.tools.brush_changed();
     }
     Ok(names)
@@ -535,6 +537,19 @@ mod tests {
         let r = s.execute("brush.presets.importProcreate", json!({"path": path.to_string_lossy()}));
         let _ = std::fs::remove_file(&path);
         assert_eq!(r.unwrap()["group"], format!("pc-procreate-{}", std::process::id()));
+    }
+
+    #[test]
+    fn an_import_that_selects_its_first_brush_makes_that_preset_current() {
+        let mut s = Session::new();
+        s.execute("tools.setBrush", json!({"preset": "Hard Round"})).unwrap();
+        let hard_round = photocraft_paint::presets::find(&s.tools.presets, "Hard Round").unwrap().brush.clone();
+        let data = photocraft_paint::tile::b64_encode(&procreate_set());
+        s.execute("brush.presets.importProcreate", json!({"data": data, "select": true})).unwrap();
+        assert_eq!(s.tools.current_preset.as_deref(), Some("Soft Ink"));
+        // Update Brush Preset now saves to the imported brush and leaves Hard Round alone.
+        assert_eq!(s.execute("brush.presets.update", json!({"brush": {"size": 33}})).unwrap()["name"], "Soft Ink");
+        assert_eq!(photocraft_paint::presets::find(&s.tools.presets, "Hard Round").unwrap().brush, hard_round);
     }
 
     #[test]
