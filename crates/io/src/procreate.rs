@@ -451,8 +451,9 @@ impl Mapper<'_> {
         }
         match self.image(dir, "Grain.png") {
             Ok(Some(img)) => {
-                // Transparent grain lets paint through, like white.
-                let v = luma_alpha(&img, |l, al| l * al + 1.0 - al)?;
+                // Transparent grain lets paint through: white, or black when the grain is inverted.
+                let back = if a.flag("textureInverted") { 0.0 } else { 1.0 };
+                let v = luma_alpha(&img, |l, al| l * al + back * (1.0 - al))?;
                 let (iw, ih) = (img.width(), img.height());
                 drop(img);
                 let (w, h, v) = fit(iw, ih, v, MAX_PATTERN_EDGE);

@@ -208,6 +208,19 @@ fn grain_becomes_a_texture_on_every_stamp() {
 }
 
 #[test]
+fn transparent_grain_lets_paint_through_inverted_or_not() {
+    let grain = png(4, 4, ChannelLayout::Rgba, |_, _| vec![0, 0, 0, 0]);
+    for inverted in [false, true] {
+        let archive = write_archive(&[("textureInverted", Field::Flag(inverted))]);
+        let imp = read_procreate(&brush_zip(&archive, Some(&bar()), Some(&grain)), "g").unwrap();
+        let t = &imp.presets[0].brush.texture;
+        let Pattern::Tile(tile) = &t.pattern else { panic!("a tile pattern expected") };
+        let level = if t.invert { 1.0 - paint_at(tile, 1, 1) } else { paint_at(tile, 1, 1) };
+        assert!(level > 0.99, "inverted {inverted}: {level}");
+    }
+}
+
+#[test]
 fn sets_follow_their_plist_and_skip_reset_copies() {
     let a = |n: &str| write_archive(&[("name", text(n))]);
     let set = write_brushset("Cat's Basics & more", &[(a("One"), Some(bar()), None), (a("Two"), Some(bar()), None), (a("Three"), Some(bar()), None)]);

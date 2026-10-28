@@ -51,11 +51,18 @@ fn file_bytes_within(p: &Value, cmd: &str, what: &str, max: u64) -> Result<(Vec<
     }
     let path =
         p.get("path").and_then(Value::as_str).filter(|s| !s.trim().is_empty()).ok_or_else(|| bad(cmd, format!("give `path` ({what}) or `data` (base64)")))?;
-    let len = std::fs::metadata(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?.len();
+    let io_err = |e: std::io::Error| EngineError::Other(format!("{path}: {e}"));
+    let file = std::fs::File::open(path).map_err(io_err)?;
+    let len = file.metadata().map_err(io_err)?.len();
     if len > max {
         return Err(bad(cmd, format!("{path}: file too large ({len} bytes)")));
     }
-    let bytes = std::fs::read(path).map_err(|e| EngineError::Other(format!("{path}: {e}")))?;
+    // Read through the handle the size came from, and no further than the cap: the file can grow.
+    let mut bytes = Vec::with_capacity(len as usize);
+    std::io::Read::read_to_end(&mut std::io::Read::take(file, max.saturating_add(1)), &mut bytes).map_err(io_err)?;
+    if bytes.len() as u64 > max {
+        return Err(bad(cmd, format!("{path}: file too large (over {max} bytes)")));
+    }
     let stem = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
     Ok((bytes, stem))
 }
@@ -121,28 +128,34 @@ fn import_abr(s: &mut Session, p: &Value) -> Result<Value> {
 
 /// Add imported `presets` as `group` under names not in use: a group of the same name is
 /// replaced unless `replace` is false, and `select` makes the first one current. Their names.
-fn add_presets(s: &mut Session, p: &Value, cmd: &str, group: &str, presets: Vec<photocraft_paint::BrushPreset>) -> Result<Vec<String>> {
+fn add_presets(s: &mut Session, p: &Value, cmd: &str, group: &str, mut presets: Vec<photocraft_paint::BrushPreset>) -> Result<Vec<String>> {
     // Re-importing a file replaces its group instead of duplicating it.
-    if p.get("replace").and_then(Value::as_bool).unwrap_or(true) {
-        s.tools.presets.retain(|x| x.builtin || x.group != group);
-    }
-    let mut taken = UniqueNames::new(s.tools.presets.iter().map(|x| x.name.as_str()));
-    let mut names = Vec::with_capacity(presets.len());
-    for mut preset in presets {
-        preset.name = taken.unique(&preset.name);
-        names.push(preset.name.clone());
-        s.tools.presets.push(preset);
-    }
+    let replace = p.get("replace").and_then(Value::as_bool).unwrap_or(true);
+    let replaced = |x: &photocraft_paint::BrushPreset| replace && !x.builtin && x.group == group;
+    let mut taken = UniqueNames::new(s.tools.presets.iter().filter(|x| !replaced(x)).map(|x| x.name.as_str()));
+    let names: Vec<String> = presets
+        .iter_mut()
+        .map(|preset| {
+            preset.name = taken.unique(&preset.name);
+            preset.name.clone()
+        })
+        .collect();
+    // Load the selected brush first, so a tip that fails to load leaves the library as it was.
+    let selected = match presets.first() {
+        Some(first) if p.get("select").and_then(Value::as_bool).unwrap_or(false) => {
+            let mut b = first.brush.clone().picked_over(&s.tools.brush);
+            s.load_brush_tips(&mut b).map_err(|e| bad(cmd, e))?;
+            Some((first.name.clone(), b))
+        }
+        _ => None,
+    };
+    s.tools.presets.retain(|x| !replaced(x));
+    s.tools.presets.extend(presets);
     s.brush_presets_changed();
-    if p.get("select").and_then(Value::as_bool).unwrap_or(false)
-        && let Some(first) = names.first()
-        && let Some(pr) = photocraft_paint::presets::find(&s.tools.presets, first)
-    {
-        let mut b = pr.brush.clone().picked_over(&s.tools.brush);
-        s.load_brush_tips(&mut b).map_err(|e| bad(cmd, e))?;
+    if let Some((name, b)) = selected {
         s.tools.brush = b;
         // So Update Brush Preset saves to the imported preset, not the one picked before.
-        s.tools.current_preset = Some(first.clone());
+        s.tools.current_preset = Some(name);
         s.tools.brush_changed();
     }
     Ok(names)
@@ -550,6 +563,20 @@ mod tests {
         // Update Brush Preset now saves to the imported brush and leaves Hard Round alone.
         assert_eq!(s.execute("brush.presets.update", json!({"brush": {"size": 33}})).unwrap()["name"], "Soft Ink");
         assert_eq!(photocraft_paint::presets::find(&s.tools.presets, "Hard Round").unwrap().brush, hard_round);
+    }
+
+    #[test]
+    fn a_selected_brush_that_fails_to_load_leaves_the_library_alone() {
+        let mut s = Session::new();
+        // A locked texture the import keeps, stored where no preset store is attached.
+        let preview = std::sync::Arc::new(photocraft_paint::GrayTile { width: 1, height: 1, data: vec![0u16].into() });
+        s.tools.brush.locks.texture = true;
+        s.tools.brush.texture.pattern =
+            photocraft_paint::Pattern::Stored(photocraft_paint::StoredTile { key: "gone".into(), width: 1, height: 1, preview, full: None });
+        let (before, current) = (s.tools.presets.len(), s.tools.current_preset.clone());
+        let data = photocraft_paint::tile::b64_encode(&procreate_set());
+        assert!(s.execute("brush.presets.importProcreate", json!({"data": data, "select": true})).is_err());
+        assert_eq!((s.tools.presets.len(), s.tools.current_preset.clone()), (before, current));
     }
 
     #[test]
