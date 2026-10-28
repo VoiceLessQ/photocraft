@@ -2766,3 +2766,21 @@ fn wrapped_live_retouch_strokes_show_what_their_commits_paint() {
         }
     }
 }
+
+#[test]
+fn a_wrapped_composite_stroke_over_its_work_budget_names_its_own_command() {
+    // Big, tightly spaced dabs pass the stroke footprint check but not the wrapped-work budget.
+    for (cmd, extra, setup) in [
+        ("paint.historyBrush", json!({"state": 1}), textured_in_history as Setup),
+        ("paint.patternStamp", json!({"pattern": "Checkerboard"}), textured as Setup),
+    ] {
+        let mut s = session(WRAP.0, WRAP.1, 8, "rgb");
+        setup(&mut s);
+        let mut p = json!({"points": [[0, 0], [700, 0]], "size": 1000, "hardness": 100, "spacing": 1, "wrap": true});
+        for (k, v) in extra.as_object().unwrap() {
+            p[k] = v.clone();
+        }
+        let err = s.execute(cmd, p).unwrap_err().to_string();
+        assert!(err.contains(cmd) && err.contains("coverage budget"), "{cmd}: {err}");
+    }
+}

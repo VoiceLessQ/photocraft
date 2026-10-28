@@ -97,7 +97,7 @@ pub(super) fn run(s: &mut Session, p: &Value) -> Result<Value> {
             Ok(apply_dab_stroke_wrapped(surf, &st.stroke, sel, lock, 0, wrap, effect))
         } else if wrap.is_some() {
             let (place, fmt) = (st.placement(), surf.format());
-            periodic::stroke(&pre, surf, &st.stroke, sel, lock, st.mode, |_, r| Ok(paint_region(&st.tile, &place, &fmt, r)))
+            periodic::stroke(&pre, surf, &st.stroke, sel, lock, st.mode, CMD, |_, r| Ok(paint_region(&st.tile, &place, &fmt, r)))
         } else {
             paint_aligned(surf, &st.stroke, sel, lock, &st.tile, st.placement(), st.mode, CMD)
         }

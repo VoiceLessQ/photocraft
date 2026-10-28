@@ -26,6 +26,7 @@ pub(super) fn project(rect: Rect, tile: Rect) -> Vec<Rect> {
 /// A composite tool's stroke wrapped around the document: `paint` gives the pixels for a
 /// rectangle in the stroke's own coordinates, from the target as it was before the stroke, and
 /// they go on through the stroke's coverage wherever it repeats on the document.
+#[allow(clippy::too_many_arguments)]
 pub(super) fn stroke(
     pre: &Document,
     target: &mut Surface,
@@ -33,6 +34,7 @@ pub(super) fn stroke(
     selection: Option<&Surface>,
     lock: bool,
     mode: BlendMode,
+    cmd: &str,
     mut paint: impl FnMut(&Surface, Rect) -> Result<Region>,
 ) -> Result<Rect> {
     let mut renderer = photocraft_paint::StrokeRenderer::new(&stroke.brush, None, 1.0);
@@ -40,7 +42,7 @@ pub(super) fn stroke(
     renderer.finish();
     let before = target.clone();
     let bounds = renderer.bounds();
-    Composite { target, before: &before, tile: pre.bounds(), opacity: stroke.brush.opacity, selection, lock, mode }.draw(
+    Composite { target, before: &before, tile: pre.bounds(), opacity: stroke.brush.opacity, selection, lock, mode, cmd }.draw(
         bounds,
         &stroke.brush,
         &stroke.points,
@@ -59,6 +61,8 @@ pub(super) struct Composite<'a> {
     pub selection: Option<&'a Surface>,
     pub lock: bool,
     pub mode: BlendMode,
+    /// The command an over-budget stroke's error names.
+    pub cmd: &'a str,
 }
 
 impl Composite<'_> {
@@ -163,7 +167,7 @@ impl Composite<'_> {
                 );
                 *work = work.saturating_add(r.width() as u64 * r.height() as u64);
                 if *work > 64 * 1024 * 1024 {
-                    return Err(bad("paint.cloneStamp", "wrapped stroke exceeds its coverage budget"));
+                    return Err(bad(self.cmd, "wrapped stroke exceeds its coverage budget"));
                 }
                 ctx.rasterize_into(dab, dual, r, &mut values, wet.then_some(&mut depths));
                 let mut sampled = None;

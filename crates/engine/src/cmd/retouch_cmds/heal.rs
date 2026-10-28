@@ -73,7 +73,7 @@ pub(super) fn healing_brush(s: &mut Session, p: &Value) -> Result<Value> {
         let mask: Vec<bool> = cov.iter().map(|c| *c > 0.0).collect();
         let healed = heal_region(&fmt, &src, &dst, &mask);
         if wrap {
-            return periodic::stroke(pre, surf, &stroke, sel, lock, mode, |_, r| {
+            return periodic::stroke(pre, surf, &stroke, sel, lock, mode, CMD, |_, r| {
                 let part = healed.crop(r);
                 if part.rect == r { Ok(part) } else { Err(bad(CMD, "the healed patch does not cover the stroke")) }
             });
@@ -114,7 +114,7 @@ pub(super) fn history_brush(s: &mut Session, p: &Value) -> Result<Value> {
         let src = if src_surface.format() == fmt { src_surface } else { src_surface.convert(fmt) };
         if flag(p, "wrap", false) {
             // Pattern Preview: the history state repeats with the canvas, as the stroke does.
-            return periodic::stroke(pre, surf, &stroke, sel, lock, mode, |_, r| periodic::sample(pre, id, &src, SampleLayers::Current, r, CMD));
+            return periodic::stroke(pre, surf, &stroke, sel, lock, mode, CMD, |_, r| periodic::sample(pre, id, &src, SampleLayers::Current, r, CMD));
         }
         let (bounds, cov) = coverage(CMD, &stroke)?;
         let paint = Region::read(&src, bounds);
