@@ -152,7 +152,7 @@ pub use cmd::type_spell_cmds;
 pub use cmd::type_styles_cmds;
 pub use cmd::updates_cmds;
 use cmd::variables_cmds;
-use cmd::vcs_cmds;
+pub use cmd::vcs_cmds;
 pub use cmd::vector_cmds;
 use cmd::video_cmds;
 pub use cmd::vp_cmds;

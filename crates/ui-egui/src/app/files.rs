@@ -512,6 +512,7 @@ impl PhotocraftApp {
             // screen, as opening it does (#4400). Automation saves don't touch the user's list.
             if hooks {
                 self.push_recent(path);
+                crate::versions_ui::saved(self, doc);
             }
         } else if self.disk_stamps.get(&doc).is_some_and(|(own, _)| own == path) {
             // A copy written over the document's own file is this app's change too.

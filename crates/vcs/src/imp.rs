@@ -27,6 +27,8 @@ const MAX_DEPTH: usize = 32;
 const MAX_WALK: usize = 100_000;
 /// Longest version message kept, in bytes.
 const MAX_MESSAGE: usize = 4096;
+/// Trailer on a version the app saved on its own: a trailer, not a commit header, so any git reads it.
+const CHECKPOINT: &str = "PhotoCraft-Checkpoint: true";
 
 /// Points a test can stop at, right after each named step, to act out a crash there.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -156,9 +158,13 @@ fn doc_tree(repo: &gix::Repository, root_tree: ObjectId, name: &str) -> Result<O
 
 fn version(repo: &gix::Repository, id: ObjectId) -> Result<Version> {
     let commit = repo.find_commit(id).git()?;
-    let message = String::from_utf8_lossy(commit.message_raw_sloppy()).trim_end().to_owned();
+    let raw = String::from_utf8_lossy(commit.message_raw_sloppy()).trim_end().to_owned();
+    let (message, checkpoint) = match raw.strip_suffix(CHECKPOINT) {
+        Some(m) if m.ends_with("\n\n") => (m.trim_end().to_owned(), true),
+        _ => (raw, false),
+    };
     let time = commit.time().git()?.seconds;
-    Ok(Version { id: id.to_string(), message, time })
+    Ok(Version { id: id.to_string(), message, time, checkpoint })
 }
 
 /// Files that belong in a version: everything but the save lock and the redrawable preview.
@@ -276,7 +282,12 @@ fn clean_message(message: &str, name: &str) -> String {
     if m.is_empty() { format!("Version of {name}") } else { m }
 }
 
-pub(crate) fn save(h: &History, name: &str, message: &str, hook: Hook) -> Result<Saved> {
+fn commit_message(message: &str, name: &str, checkpoint: bool) -> String {
+    let m = clean_message(message, name);
+    if checkpoint { format!("{m}\n\n{CHECKPOINT}") } else { m }
+}
+
+pub(crate) fn save(h: &History, name: &str, message: &str, checkpoint: bool, hook: Hook) -> Result<Saved> {
     let stage = h.stage_dir(name)?;
     if !stage.join("manifest.json").is_file() {
         return Err(Error::NothingStaged(name.to_owned()));
@@ -321,7 +332,7 @@ pub(crate) fn save(h: &History, name: &str, message: &str, hook: Hook) -> Result
             author: sig.clone(),
             committer: sig,
             encoding: None,
-            message: clean_message(message, name).into(),
+            message: commit_message(message, name, checkpoint).into(),
             extra_headers: Vec::new(),
         })
         .git()?

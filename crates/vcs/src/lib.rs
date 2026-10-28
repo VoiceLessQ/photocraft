@@ -75,6 +75,8 @@ pub struct Version {
     pub message: String,
     /// When it was saved, in seconds since the Unix epoch.
     pub time: i64,
+    /// Saved by the app on its own ([`History::checkpoint`]), not by the person.
+    pub checkpoint: bool,
 }
 
 /// What [`History::save`] did.
@@ -127,7 +129,19 @@ impl History {
     /// Returns the existing newest version with `created: false` when nothing changed.
     pub fn save(&self, name: &str, message: &str) -> Result<Saved> {
         #[cfg(not(target_arch = "wasm32"))]
-        return imp::save(self, name, message, &mut |_| Ok(()));
+        return imp::save(self, name, message, false, &mut |_| Ok(()));
+        #[cfg(target_arch = "wasm32")]
+        {
+            let _ = (name, message);
+            Err(Error::Unsupported)
+        }
+    }
+
+    /// [`History::save`] for a version the app saves on its own (on a timer, or with the file):
+    /// listed with [`Version::checkpoint`] set, so it shows apart from the ones people name.
+    pub fn checkpoint(&self, name: &str, message: &str) -> Result<Saved> {
+        #[cfg(not(target_arch = "wasm32"))]
+        return imp::save(self, name, message, true, &mut |_| Ok(()));
         #[cfg(target_arch = "wasm32")]
         {
             let _ = (name, message);

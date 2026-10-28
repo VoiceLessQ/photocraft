@@ -5,7 +5,7 @@ use super::{Row, TAB, rows, when};
 use crate::PhotocraftApp;
 
 fn row(time: i64) -> Row {
-    Row { id: "a".repeat(40), message: "m".into(), time, date: "2026-01-02 03:04 UTC".into() }
+    Row { id: "a".repeat(40), message: "m".into(), time, date: "2026-01-02 03:04 UTC".into(), checkpoint: false }
 }
 
 #[test]
@@ -26,8 +26,8 @@ fn times_read_as_ago_then_as_a_date() {
 
 #[test]
 fn rows_skip_entries_without_an_id() {
-    let v = json!({"versions": [{"id": "b", "message": "x", "time": 5, "date": "d"}, {"message": "no id"}, 7, null]});
-    assert_eq!(rows(&v), vec![Row { id: "b".into(), message: "x".into(), time: 5, date: "d".into() }]);
+    let v = json!({"versions": [{"id": "b", "message": "x", "time": 5, "date": "d", "checkpoint": true}, {"message": "no id"}, 7, null]});
+    assert_eq!(rows(&v), vec![Row { id: "b".into(), message: "x".into(), time: 5, date: "d".into(), checkpoint: true }]);
     assert!(rows(&json!({})).is_empty());
     assert!(rows(&json!({"versions": "nope"})).is_empty());
 }
@@ -153,4 +153,110 @@ fn drawing_the_chip_keeps_the_status_line() {
     assert_eq!(h.state().ui.status, "Couldn't save art.pcraft: disk full");
     assert!(h.state().ui.status_error);
     assert!(h.query_by_label("Versions").is_some());
+}
+
+/// Finish every checkpoint the shell started and hand the results to the UI.
+fn drain(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    let jobs: Vec<_> = app.versions.pending.iter().map(|(j, _, _)| *j).collect();
+    for job in jobs {
+        let _ = app.session.wait_job(job);
+    }
+    crate::jobs_ui::tick(app, ctx);
+    assert!(app.versions.pending.is_empty());
+}
+
+fn fire(app: &mut PhotocraftApp, ctx: &egui::Context) {
+    app.versions.next_ms = f64::MIN_POSITIVE;
+    super::tick(app, ctx);
+    drain(app, ctx);
+}
+
+fn listed(app: &mut PhotocraftApp) -> Vec<(String, bool)> {
+    let v = app.session.execute("file.versions.list", json!({})).unwrap();
+    rows(&v).into_iter().map(|r| (r.message, r.checkpoint)).collect()
+}
+
+#[test]
+fn the_timer_checkpoints_changed_documents_once_they_have_a_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app_with_doc(dir.path());
+    app.run("prefs.set", json!({"values": {"fileHandling.versionMinutes": 1}})).unwrap();
+    super::tick(&mut app, &ctx);
+    assert!(app.versions.next_ms > 0.0, "armed");
+    super::tick(&mut app, &ctx);
+    assert!(app.versions.pending.is_empty(), "not due yet");
+    // Changed, but no version yet: no history appears beside the file.
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    fire(&mut app, &ctx);
+    assert!(!dir.path().join(".photocraft-versions").join("history.git").exists());
+    app.run("file.versions.save", json!({"message": "named"})).unwrap();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    fire(&mut app, &ctx);
+    assert_eq!(listed(&mut app), vec![("Auto-saved".into(), true), ("named".into(), false)]);
+    // Nothing changed since: the next firing starts no job.
+    app.versions.next_ms = f64::MIN_POSITIVE;
+    super::tick(&mut app, &ctx);
+    assert!(app.versions.pending.is_empty());
+    // Off: never fires.
+    app.run("prefs.set", json!({"values": {"fileHandling.versionMinutes": 0}})).unwrap();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    fire(&mut app, &ctx);
+    assert_eq!(listed(&mut app).len(), 2);
+    assert_eq!(app.versions.next_ms, 0.0);
+}
+
+#[test]
+fn the_timer_waits_while_a_button_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app_with_doc(dir.path());
+    app.run("file.versions.save", json!({})).unwrap();
+    super::tick(&mut app, &ctx);
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    let press = |down| egui::RawInput {
+        events: vec![egui::Event::PointerButton {
+            pos: egui::pos2(5.0, 5.0),
+            button: egui::PointerButton::Primary,
+            pressed: down,
+            modifiers: Default::default(),
+        }],
+        ..Default::default()
+    };
+    // The fork asserts that a frame's texture changes are taken, not dropped.
+    let frame = |input| ctx.run_ui(input, |_| {}).textures_delta.clear();
+    frame(press(true));
+    app.versions.next_ms = f64::MIN_POSITIVE;
+    super::tick(&mut app, &ctx);
+    assert!(app.versions.pending.is_empty(), "mid-stroke: waits");
+    frame(press(false));
+    super::tick(&mut app, &ctx);
+    drain(&mut app, &ctx);
+    assert_eq!(listed(&mut app).len(), 2);
+}
+
+#[test]
+fn saving_the_file_saves_a_checkpoint() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app_with_doc(dir.path());
+    let doc = app.session.active().unwrap().doc.id;
+    let path = app.session.active().unwrap().path.clone().unwrap();
+    // A document with no versions gets none from saving it.
+    app.saved(doc, 1, &path, &[], false);
+    drain(&mut app, &ctx);
+    assert!(listed(&mut app).is_empty());
+    app.run("file.versions.save", json!({"message": "named"})).unwrap();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    app.saved(doc, 2, &path, &[], true);
+    drain(&mut app, &ctx);
+    assert_eq!(listed(&mut app).len(), 1, "a copy is not the document's file");
+    app.saved(doc, 2, &path, &[], false);
+    drain(&mut app, &ctx);
+    assert_eq!(listed(&mut app), vec![("Saved to file".into(), true), ("named".into(), false)]);
+    app.run("prefs.set", json!({"values": {"fileHandling.versionOnSave": false}})).unwrap();
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    app.saved(doc, 3, &path, &[], false);
+    drain(&mut app, &ctx);
+    assert_eq!(listed(&mut app).len(), 2, "off: saving adds none");
 }

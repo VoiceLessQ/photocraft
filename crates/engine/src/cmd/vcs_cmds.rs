@@ -7,15 +7,25 @@
 //! Restoring loads a version into the open document as one undoable step, like File › Revert; the
 //! file on disk changes only when the person saves. The current state is saved as a version first
 //! and the restore lands as a new version on top, so nothing leaves the history.
+//!
+//! Checkpoints are versions the app saves on its own ([`start_checkpoint`]: the shell's timer and
+//! File › Save, Preferences › File Handling). They only add to a history the person started, so a
+//! document gets no hidden folder until someone saves a version of it.
 
 use std::path::Path;
+use std::sync::Arc;
 
+use photocraft_doc::{DocId, Document};
 use photocraft_vcs::History;
 use serde_json::{Value, json};
 
 use crate::commands::CommandSpec;
+use crate::jobs::Started;
 use crate::presets::{bad, req_str};
 use crate::{EngineError, Result, Session};
+
+/// The id a checkpoint job reports under ([`crate::jobs::JobEvent::command`]).
+pub const SAVE: &str = "file.versions.save";
 
 /// Versions `file.versions.list` returns when no `limit` is given, and at most.
 const DEFAULT_LIMIT: u64 = 50;
@@ -25,12 +35,15 @@ fn vcs_err(e: photocraft_vcs::Error) -> EngineError {
     EngineError::Other(e.to_string())
 }
 
+fn need_path() -> EngineError {
+    EngineError::Other("save the document once first: its versions are kept in a folder beside the file".into())
+}
+
 /// The active document's history and its name there; it needs a path to sit beside.
 fn history(s: &Session) -> Result<(History, String)> {
     crate::file_cmds::native(s).map_err(EngineError::Other)?;
     let d = s.active().ok_or(EngineError::NoDocument)?;
-    let path = d.path.as_deref().ok_or_else(|| EngineError::Other("save the document once first: its versions are kept in a folder beside the file".into()))?;
-    History::beside(Path::new(path)).map_err(vcs_err)
+    History::beside(Path::new(d.path.as_deref().ok_or_else(need_path)?)).map_err(vcs_err)
 }
 
 fn can_version(s: &Session) -> std::result::Result<(), String> {
@@ -41,13 +54,51 @@ fn can_version(s: &Session) -> std::result::Result<(), String> {
 
 /// Write the active document into the history's staging folder, as a folder `.pcraft`.
 fn stage(s: &Session, h: &History, name: &str) -> Result<()> {
-    let d = s.active().ok_or(EngineError::NoDocument)?;
+    stage_doc(&s.active().ok_or(EngineError::NoDocument)?.doc, h, name)
+}
+
+fn stage_doc(doc: &Document, h: &History, name: &str) -> Result<()> {
     let dir = h.stage_dir(name).map_err(vcs_err)?;
     std::fs::create_dir_all(&dir).map_err(|e| EngineError::Other(format!("could not create {}: {e}", dir.display())))?;
     photocraft_format::PcraftWriter::new()
-        .save_dir(&d.doc, &dir, &photocraft_format::SaveOptions::default())
+        .save_dir(doc, &dir, &photocraft_format::SaveOptions::default())
         .map_err(|e| EngineError::Other(format!("could not stage the document for a version: {e}")))?;
     Ok(())
+}
+
+/// Stage `doc` and commit it: the work of a save, on whichever thread runs it. A checkpoint of a
+/// document with no versions yet is skipped (`{"created": false, "skipped": true}`).
+fn commit(doc: &Document, h: &History, name: &str, message: &str, checkpoint: bool) -> Result<Value> {
+    if checkpoint && h.list(name, 1).map_err(vcs_err)?.is_empty() {
+        return Ok(json!({"created": false, "skipped": true}));
+    }
+    stage_doc(doc, h, name)?;
+    let saved = if checkpoint { h.checkpoint(name, message) } else { h.save(name, message) }.map_err(vcs_err)?;
+    let mut out = version_json(&saved.version);
+    out["created"] = json!(saved.created);
+    Ok(out)
+}
+
+/// Save a checkpoint of document `doc` in the background, for the shell: not journaled, so it
+/// never lands in a recorded action or the History Log. The job reports as [`SAVE`] with
+/// `{"checkpoint": true}`; its result is [`file.versions.save`](SAVE)'s.
+pub fn start_checkpoint(s: &mut Session, doc: DocId, message: &str) -> Result<Started> {
+    crate::file_cmds::native(s).map_err(EngineError::Other)?;
+    let d = s.documents().iter().find(|d| d.doc.id == doc).ok_or(EngineError::NoDocument)?;
+    let (h, name) = History::beside(Path::new(d.path.as_deref().ok_or_else(need_path)?)).map_err(vcs_err)?;
+    let snapshot: Arc<Document> = d.doc.clone();
+    let message = message.to_owned();
+    s.start_job(
+        SAVE,
+        json!({"checkpoint": true, "docId": doc.0}),
+        "Saving a checkpoint",
+        false,
+        move |ctx| {
+            ctx.progress(0.0, "Saving a checkpoint");
+            commit(&snapshot, &h, &name, &message, true)
+        },
+        |_, out| Ok(out),
+    )
 }
 
 fn version_json(v: &photocraft_vcs::Version) -> Value {
@@ -57,21 +108,34 @@ fn version_json(v: &photocraft_vcs::Version) -> Value {
     let date = chrono::DateTime::from_timestamp(v.time, 0).map(|d| d.format("%Y-%m-%d %H:%M UTC").to_string());
     #[cfg(target_arch = "wasm32")]
     let date: Option<String> = None;
-    json!({"id": v.id, "message": v.message, "time": v.time, "date": date})
+    json!({"id": v.id, "message": v.message, "time": v.time, "date": date, "checkpoint": v.checkpoint})
 }
 
 fn save(s: &mut Session, p: &Value) -> Result<Value> {
     let message = match p.get("message") {
-        None | Some(Value::Null) => "",
-        Some(Value::String(m)) => m.as_str(),
-        Some(_) => return Err(bad("file.versions.save", "`message` must be a string")),
+        None | Some(Value::Null) => String::new(),
+        Some(Value::String(m)) => m.clone(),
+        Some(_) => return Err(bad(SAVE, "`message` must be a string")),
+    };
+    let checkpoint = match p.get("checkpoint") {
+        None | Some(Value::Null) => false,
+        Some(Value::Bool(b)) => *b,
+        Some(_) => return Err(bad(SAVE, "`checkpoint` must be true or false")),
     };
     let (h, name) = history(s)?;
-    stage(s, &h, &name)?;
-    let saved = h.save(&name, message).map_err(vcs_err)?;
-    let mut out = version_json(&saved.version);
-    out["created"] = json!(saved.created);
-    Ok(out)
+    let doc = s.active().ok_or(EngineError::NoDocument)?.doc.clone();
+    // A background job when started with `Session::start`: staging a large document takes a
+    // second or more, and the snapshot leaves the document free to edit meanwhile.
+    crate::jobs::run(
+        s,
+        "Save Version",
+        false,
+        move |ctx| {
+            ctx.progress(0.0, "Saving a version");
+            commit(&doc, &h, &name, &message, checkpoint)
+        },
+        |_, out| Ok(out),
+    )
 }
 
 fn list(s: &mut Session, p: &Value) -> Result<Value> {
@@ -136,7 +200,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Save Version",
             menu: &[],
             shortcut: None,
-            params: r#"{"message":str=""} → {id, message, time, created}: save the open document (unsaved edits too) as a version in .photocraft-versions beside its file; created=false when nothing changed"#,
+            params: r#"{"message":str="", "checkpoint":bool=false} → {id, message, time, checkpoint, created}: save the open document (unsaved edits too) as a version in .photocraft-versions beside its file; created=false when nothing changed. checkpoint=true marks it as saved by the app and does nothing ({created:false, skipped:true}) until the document has a version"#,
             enabled: can_version,
             journal: true,
             run: save,
@@ -146,7 +210,7 @@ pub fn specs() -> Vec<CommandSpec> {
             label: "Versions",
             menu: &[],
             shortcut: None,
-            params: r#"{"limit":int=50} → {versions:[{id, message, time, date}], history}: the open document's versions, newest first (time in Unix seconds, date in UTC)"#,
+            params: r#"{"limit":int=50} → {versions:[{id, message, time, date, checkpoint}], history}: the open document's versions, newest first (time in Unix seconds, date in UTC; checkpoint: saved by the app, not named)"#,
             enabled: can_version,
             journal: false,
             run: list,

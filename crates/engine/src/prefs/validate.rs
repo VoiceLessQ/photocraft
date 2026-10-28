@@ -107,6 +107,7 @@ pub fn choices(path: &str) -> Option<&'static [&'static str]> {
 pub fn range(path: &str) -> Option<(f64, f64)> {
     Some(match path {
         "fileHandling.autosaveMinutes" => (1.0, 240.0),
+        "fileHandling.versionMinutes" => (0.0, 60.0),
         "fileHandling.recentFileCount" => (0.0, 100.0),
         "tools.nudgeBundlePauseMs" => (100.0, 10_000.0),
         "fileHandling.rasterizeSvgGroupsDeeperThan" => (0.0, photocraft_doc::MAX_GROUP_DEPTH as f64),

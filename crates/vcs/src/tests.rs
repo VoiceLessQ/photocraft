@@ -233,6 +233,26 @@ fn messages_are_cleaned() {
 }
 
 #[test]
+fn checkpoints_are_marked_and_their_message_kept() {
+    let f = two_versions();
+    let stage = f.h.stage_dir(NAME).unwrap();
+    write_doc(&stage, r#"{"v":3}"#, &[("a.zst", b"tile-a")]);
+    let cp = f.h.checkpoint(NAME, "Auto-saved").unwrap();
+    assert!(cp.created && cp.version.checkpoint);
+    assert_eq!(cp.version.message, "Auto-saved");
+    // A long message is cut before the trailer goes on, so the mark survives.
+    write_doc(&stage, r#"{"v":4}"#, &[("a.zst", b"tile-a")]);
+    assert!(f.h.checkpoint(NAME, &"x".repeat(9000)).unwrap().version.checkpoint);
+    assert!(!f.h.checkpoint(NAME, "unchanged").unwrap().created);
+    let list = f.h.list(NAME, 10).unwrap();
+    assert_eq!(list.iter().map(|v| v.checkpoint).collect::<Vec<_>>(), vec![true, true, false, false]);
+    // A checkpoint restores like any version.
+    let dest = f.out("cp");
+    assert!(f.h.checkout(NAME, &cp.version.id, &dest).unwrap().checkpoint);
+    assert_eq!(contents(&dest).get("manifest.json").map(Vec::as_slice), Some(&br#"{"v":3}"#[..]));
+}
+
+#[test]
 fn preview_and_lock_are_left_out() {
     let dir = tempfile::tempdir().unwrap();
     let h = History::at(dir.path().join(FOLDER));
@@ -267,7 +287,7 @@ fn crash_during_save_keeps_history_and_retry_works() {
         let f = two_versions();
         write_doc(&f.stage(), r#"{"v":3}"#, &[("z.zst", b"tile-z")]);
         let v3 = contents(&f.stage());
-        assert!(save_with(&f.h, NAME, "third", &mut crash(at)).is_err());
+        assert!(save_with(&f.h, NAME, "third", false, &mut crash(at)).is_err());
         assert_eq!(f.ids(), vec![f.id2.clone(), f.id1.clone()], "{at:?}: history unchanged");
         let saved = f.h.save(NAME, "third").unwrap();
         assert!(saved.created, "{at:?}");

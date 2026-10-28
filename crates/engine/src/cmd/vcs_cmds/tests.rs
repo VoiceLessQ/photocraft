@@ -106,7 +106,7 @@ fn the_file_on_disk_is_never_touched() {
 fn bad_params_are_errors_and_write_nothing() {
     let dir = tempfile::tempdir().unwrap();
     let (mut s, _) = session(dir.path());
-    for p in [json!({"message": 5}), json!({"message": ["a"]}), json!({"message": {}})] {
+    for p in [json!({"message": 5}), json!({"message": ["a"]}), json!({"message": {}}), json!({"checkpoint": "yes"}), json!({"checkpoint": 1})] {
         assert!(s.execute("file.versions.save", p.clone()).is_err(), "{p}");
     }
     for p in [json!({"limit": -1}), json!({"limit": 1.5}), json!({"limit": "9"}), json!({"limit": 10_001}), json!({"limit": true})] {
@@ -123,6 +123,55 @@ fn bad_params_are_errors_and_write_nothing() {
     s.execute("image.adjustments.invert", json!({})).unwrap();
     assert!(s.execute("file.versions.restore", json!({"id": "0".repeat(40)})).is_err());
     assert_eq!(versions(&mut s).len(), before, "an unknown id saves no 'Before restoring' version");
+}
+
+#[test]
+fn a_checkpoint_waits_for_the_first_version() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    let skipped = s.execute("file.versions.save", json!({"checkpoint": true})).unwrap();
+    assert_eq!((skipped["created"].clone(), skipped["skipped"].clone()), (json!(false), json!(true)));
+    assert!(!dir.path().join(".photocraft-versions").join("history.git").exists(), "no history until a person saves a version");
+    s.execute("file.versions.save", json!({"message": "named"})).unwrap();
+    s.execute("image.adjustments.invert", json!({})).unwrap();
+    let cp = s.execute("file.versions.save", json!({"checkpoint": true, "message": "Auto-saved"})).unwrap();
+    assert_eq!((cp["created"].clone(), cp["checkpoint"].clone()), (json!(true), json!(true)));
+    let flags: Vec<Value> = versions(&mut s).iter().map(|v| v["checkpoint"].clone()).collect();
+    assert_eq!(flags, vec![json!(true), json!(false)]);
+    assert_eq!(messages(&mut s), vec!["Auto-saved", "named"]);
+}
+
+#[test]
+fn a_shell_checkpoint_runs_in_the_background_and_is_not_journaled() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    s.execute("file.versions.save", json!({"message": "named"})).unwrap();
+    s.execute("image.adjustments.invert", json!({})).unwrap();
+    let doc = s.active().unwrap().doc.id;
+    // Another document is active when the checkpoint starts.
+    s.execute("file.new", json!({"width": 8, "height": 8})).unwrap();
+    let journal = s.journal.len();
+    let crate::jobs::Started::Job(job) = super::start_checkpoint(&mut s, doc, "Auto-saved").unwrap() else { panic!("a background job") };
+    let done = s.wait_job(job).unwrap();
+    assert_eq!((done["created"].clone(), done["checkpoint"].clone()), (json!(true), json!(true)));
+    assert_eq!(s.journal.len(), journal, "not journaled");
+    assert!(s.set_active(0));
+    assert_eq!(messages(&mut s), vec!["Auto-saved", "named"]);
+    // A document with no path, or one that is gone, is an error, not a panic.
+    assert!(s.set_active(1));
+    let unsaved = s.active().unwrap().doc.id;
+    assert!(super::start_checkpoint(&mut s, unsaved, "x").is_err());
+    s.execute("file.close", json!({})).unwrap();
+    assert!(super::start_checkpoint(&mut s, unsaved, "x").is_err());
+}
+
+#[test]
+fn a_started_save_runs_as_a_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    let crate::jobs::Started::Job(job) = s.start("file.versions.save", json!({"message": "bg"})).unwrap() else { panic!("a background job") };
+    assert_eq!(s.wait_job(job).unwrap()["created"], true);
+    assert_eq!(messages(&mut s), vec!["bg"]);
 }
 
 #[test]

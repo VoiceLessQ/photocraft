@@ -34,6 +34,8 @@ pub(super) fn humanize(key: &str) -> String {
         "darkTheme" => return "Dark Theme".into(),
         "lightTheme" => return "Light Theme".into(),
         "automaticallyCheckUpdates" => return "Automatically Check for Updates".into(),
+        "versionMinutes" => return "Version checkpoint minutes (0 = off)".into(),
+        "versionOnSave" => return "Also save a checkpoint when saving".into(),
         _ => {}
     }
     // These controls appear only for WebP, so reuse the existing translated labels.

@@ -484,6 +484,10 @@ pub struct FileHandling {
     pub autosave_minutes: u32,
     /// Offer to reopen recovered documents at launch.
     pub recover_on_launch: bool,
+    /// Minutes between checkpoints of changed documents that have versions (0 = off).
+    pub version_minutes: u32,
+    /// Saving a document that has versions also saves a checkpoint of it.
+    pub version_on_save: bool,
     /// Open a file with no ICC profile as untagged even when its EXIF ColorSpace tag says sRGB.
     pub ignore_exif_profile_tag: bool,
     /// Most renderers write ACEScg EXRs without stating the colour space. With this on, an EXR
@@ -519,6 +523,8 @@ impl Default for FileHandling {
             autosave: true,
             autosave_minutes: 10,
             recover_on_launch: true,
+            version_minutes: 10,
+            version_on_save: true,
             ignore_exif_profile_tag: false,
             exr_aces_cg: false,
             ask_before_saving_layered_tiff: true,

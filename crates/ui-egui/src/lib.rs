@@ -654,6 +654,8 @@ pub struct PhotocraftApp {
     last_frame_start_ms: f64,
     /// Background job bookkeeping: opening tabs, control replies waiting on a job.
     pub jobs: jobs_ui::JobsUi,
+    /// Checkpoints saved on a timer and with the file (Versions panel).
+    pub versions: versions_ui::Auto,
     #[cfg(all(debug_assertions, not(target_arch = "wasm32")))]
     live_tokens: theme::live::LiveTokens,
 }

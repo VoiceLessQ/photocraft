@@ -451,6 +451,7 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
     // Photoshop's cue. Cancelling is the user's own action and stays silent.
     if matches!(e.outcome, JobOutcome::Done(_))
         && app.session.prefs().general.beep_when_done
+        && !crate::versions_ui::is_checkpoint(app, e.id)
         && let Some(beep) = app.services.beep
     {
         beep();
@@ -471,6 +472,9 @@ fn on_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: JobEvent) {
     });
     // A Free Transform commit's session ends with its job (then reported like any job).
     crate::transform_tool::on_job_event(app, &e);
+    if crate::versions_ui::on_job_event(app, ctx, &e) {
+        return;
+    }
     if crate::prefs_ui::on_recovery_event(app, &e) {
         return;
     }
