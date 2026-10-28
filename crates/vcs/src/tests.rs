@@ -6,6 +6,8 @@ use std::path::{Path, PathBuf};
 use crate::imp::test_hooks::{Step, classify_io, save_with};
 use crate::{Error, FOLDER, History};
 
+mod location;
+
 /// Write a minimal folder bundle: a manifest plus the given tiles, replacing what was there.
 fn write_doc(path: &Path, manifest: &str, tiles: &[(&str, &[u8])]) {
     if path.exists() {

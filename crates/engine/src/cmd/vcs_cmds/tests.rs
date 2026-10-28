@@ -176,9 +176,101 @@ fn a_started_save_runs_as_a_job() {
 
 #[test]
 fn every_version_command_is_registered_with_docs() {
-    for id in ["file.versions.save", "file.versions.list", "file.versions.restore"] {
+    for id in ["file.versions.save", "file.versions.list", "file.versions.restore", "file.versions.location", "file.versions.move", "file.versions.link"] {
         let spec = crate::commands::command_specs().iter().find(|c| c.id == id).unwrap_or_else(|| panic!("{id} registered"));
         assert!(spec.menu.is_empty(), "{id}: no Photoshop menu entry");
         assert!(spec.params.contains('→'), "{id}: params say what comes back");
     }
+}
+
+#[test]
+fn the_history_moves_and_comes_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    s.execute("file.versions.save", json!({"message": "one"})).unwrap();
+    let here = s.execute("file.versions.location", json!({})).unwrap();
+    assert_eq!((here["linked"].clone(), here["offline"].clone()), (json!(false), json!(false)));
+    assert_eq!(here["history"], here["default"]);
+    let away = dir.path().join("drive").join("versions");
+    let moved = s.execute("file.versions.move", json!({"dir": away.display().to_string()})).unwrap();
+    assert_eq!((moved["linked"].clone(), moved["leftover"].clone()), (json!(true), Value::Null));
+    assert!(dir.path().join(".photocraft-versions.link").is_file());
+    assert_eq!(messages(&mut s), vec!["one"]);
+    s.execute("image.adjustments.invert", json!({})).unwrap();
+    s.execute("file.versions.save", json!({"message": "two"})).unwrap();
+    assert!(away.join("history.git").is_dir());
+    let home = here["default"].as_str().unwrap().to_owned();
+    let back = s.execute("file.versions.move", json!({"dir": home})).unwrap();
+    assert_eq!(back["linked"], false);
+    assert_eq!(messages(&mut s), vec!["two", "one"]);
+    assert!(!away.exists());
+}
+
+#[test]
+fn an_offline_history_is_reported_and_checkpoints_wait() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    s.execute("file.versions.save", json!({"message": "one"})).unwrap();
+    let away = dir.path().join("usb");
+    s.execute("file.versions.move", json!({"dir": away.display().to_string()})).unwrap();
+    let unplugged = dir.path().join("usb-out");
+    std::fs::rename(&away, &unplugged).unwrap();
+    let listed = s.execute("file.versions.list", json!({})).unwrap();
+    assert_eq!((listed["offline"].clone(), listed["versions"].clone()), (json!(true), json!([])));
+    assert_eq!(s.execute("file.versions.location", json!({})).unwrap()["offline"], true);
+    let e = s.execute("file.versions.save", json!({})).unwrap_err().to_string();
+    assert!(e.contains("can't be reached"), "{e}");
+    let cp = s.execute("file.versions.save", json!({"checkpoint": true})).unwrap();
+    assert_eq!((cp["skipped"].clone(), cp["offline"].clone()), (json!(true), json!(true)));
+    assert!(!away.exists(), "nothing is created in its place");
+    std::fs::rename(&unplugged, &away).unwrap();
+    assert_eq!(messages(&mut s), vec!["one"]);
+}
+
+#[test]
+fn find_history_refuses_one_another_folder_uses() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut a, _) = session(&dir.path().join("a"));
+    std::fs::create_dir_all(dir.path().join("a")).unwrap();
+    a.execute("file.versions.save", json!({"message": "a1"})).unwrap();
+    let hist = dir.path().join("hist");
+    a.execute("file.versions.move", json!({"dir": hist.display().to_string()})).unwrap();
+    std::fs::create_dir_all(dir.path().join("b")).unwrap();
+    let (mut b, _) = session(&dir.path().join("b"));
+    let e = b.execute("file.versions.link", json!({"dir": hist.display().to_string()})).unwrap_err().to_string();
+    assert!(e.contains("one history serves one folder"), "{e}");
+    std::fs::remove_dir_all(dir.path().join("a")).unwrap();
+    let linked = b.execute("file.versions.link", json!({"dir": hist.display().to_string()})).unwrap();
+    assert_eq!(linked["linked"], true);
+    assert_eq!(messages(&mut b), vec!["a1"]);
+}
+
+#[test]
+fn bad_location_params_change_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    s.execute("file.versions.save", json!({})).unwrap();
+    let busy = dir.path().join("busy");
+    std::fs::create_dir_all(&busy).unwrap();
+    std::fs::write(busy.join("keep.txt"), b"x").unwrap();
+    for id in ["file.versions.move", "file.versions.link"] {
+        for p in [json!({}), json!({"dir": ""}), json!({"dir": "  "}), json!({"dir": 5}), json!({"dir": "a\u{0}b"}), json!({"dir": busy.display().to_string()})]
+        {
+            assert!(s.execute(id, p.clone()).is_err(), "{id} {p}");
+        }
+    }
+    assert!(!dir.path().join(".photocraft-versions.link").exists());
+    assert!(busy.join("keep.txt").exists());
+    assert_eq!(versions(&mut s).len(), 1);
+}
+
+#[test]
+fn a_started_move_runs_as_a_job() {
+    let dir = tempfile::tempdir().unwrap();
+    let (mut s, _) = session(dir.path());
+    s.execute("file.versions.save", json!({})).unwrap();
+    let away = dir.path().join("away");
+    let crate::jobs::Started::Job(job) = s.start("file.versions.move", json!({"dir": away.display().to_string()})).unwrap() else { panic!("a background job") };
+    assert_eq!(s.wait_job(job).unwrap()["linked"], true);
+    assert_eq!(versions(&mut s).len(), 1);
 }

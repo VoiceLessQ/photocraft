@@ -24,11 +24,31 @@ history.checkout(&name, &versions[1].id, Path::new("/tmp/v.pcraft"))?; // then l
 
 | Call | Does |
 |---|---|
-| `History::beside(path)` | The default history for a document and the name it is stored under |
+| `History::beside(path)` | The history for a document (its folder's link, else `.photocraft-versions`) and the name it is stored under |
 | `stage_dir(name)` | Where the app writes the document before `save` |
 | `save(name, message)` | Commits the staging folder. Returns `created: false` when nothing changed |
+| `checkpoint(name, message)` | `save` for a version the app made on its own; listed with `checkpoint: true` |
 | `list(name, limit)` | Versions that changed this document, newest first |
 | `checkout(name, id, dest)` | Writes a version into an empty folder for the app to load |
+| `relocate(folder, dest, progress)` | Moves a folder's history into an empty folder elsewhere, or back |
+| `relink(folder, dir)` | Points a folder at an existing history after either one moved |
+
+## Keeping the history elsewhere
+
+A `.photocraft-versions.link` file beside the documents holds one line: the
+path of the history folder. It wins over `.photocraft-versions`. `relocate`
+copies the repository into `dest`, compares every byte, renames it into place,
+then switches the link (a temp file renamed over it; removed when `dest` is the
+default folder), and only then deletes the old copy. A crash before the switch
+leaves the old history in use (a retry clears the unused copy); after it, the
+new one, with the old copy left on disk. The staging folders are not copied:
+the app writes them again on the next save.
+
+A linked history that can't be reached is `Error::Offline`, and a linked folder
+without a repository is `Error::Damaged`: a fresh, empty history is never
+started in its place. Each moved or linked repository records the folder it
+serves (`photocraft-project`); `relink` refuses a history another folder still
+uses (`Error::Shared`).
 
 ## What it guarantees
 
@@ -50,5 +70,7 @@ history.checkout(&name, &versions[1].id, Path::new("/tmp/v.pcraft"))?; // then l
 Several documents share one history; each version replaces only its own
 document's subtree, and `list` shows only the versions that changed it.
 
-Known gaps: the staging folder doubles the disk use of each document; macOS
+Known gaps: the staging folder doubles the disk use of each document; moving
+back to the default folder is refused while an old copy that could not be
+deleted is still there; macOS
 flushes with `fsync`, not `F_FULLFSYNC`; Windows can't flush folders.

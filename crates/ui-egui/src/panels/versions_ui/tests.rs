@@ -131,7 +131,7 @@ fn rows_sit_right_under_the_note_field() {
     h.state_mut().run("file.versions.save", json!({})).unwrap();
     h.state_mut().run("image.adjustments.invert", json!({})).unwrap();
     h.state_mut().run("file.versions.save", json!({})).unwrap();
-    super::forget(&h.ctx);
+    super::forget(h.state_mut());
     h.run_steps(3);
     let field = h.get_by_label("Version note").rect();
     let first = h.get_all_by_label("Restore this version (Undo brings back what you had)").map(|n| n.rect()).fold(f32::MAX, |top, r| top.min(r.top()));
@@ -259,4 +259,66 @@ fn saving_the_file_saves_a_checkpoint() {
     app.saved(doc, 3, &path, &[], false);
     drain(&mut app, &ctx);
     assert_eq!(listed(&mut app).len(), 2, "off: saving adds none");
+}
+
+#[test]
+fn the_footer_moves_the_versions_and_back() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_doc(dir.path());
+    app.run("file.versions.save", json!({"message": "one"})).unwrap();
+    let mut h = harness(app, true);
+    assert!(h.query_by_label("Kept beside the file").is_some());
+    assert!(h.query_by_label("Move Back").is_none());
+    let away = dir.path().join("drive");
+    super::start_move(h.state_mut(), &away.display().to_string());
+    h.run_steps(3);
+    assert!(h.state().ui.status.starts_with("Versions moved to"), "{}", h.state().ui.status);
+    assert!(h.query_by_label_contains("Kept in").is_some());
+    h.get_by_label("Move Back").click();
+    h.run_steps(3);
+    assert!(h.query_by_label("Kept beside the file").is_some(), "{}", h.state().ui.status);
+    assert!(!away.exists());
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 1);
+}
+
+#[test]
+fn an_offline_history_is_shown_and_found_again() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut app = app_with_doc(dir.path());
+    app.run("file.versions.save", json!({"message": "one"})).unwrap();
+    let away = dir.path().join("usb");
+    app.run("file.versions.move", json!({"dir": away.display().to_string()})).unwrap();
+    let moved = dir.path().join("usb-renamed");
+    std::fs::rename(&away, &moved).unwrap();
+    let chip = harness(app, false);
+    assert!(chip.query_by_label("History offline").is_some());
+    let mut h = harness(chip.into_state(), true);
+    assert!(h.query_by_label_contains("can't be reached").is_some());
+    assert!(h.query_by_label("Save Version").is_none());
+    assert!(h.query_by_label("Find History Folder…").is_some());
+    super::find(h.state_mut(), &moved.display().to_string());
+    h.run_steps(3);
+    assert!(h.state().ui.status.starts_with("Using the versions in"), "{}", h.state().ui.status);
+    assert_eq!(h.get_all_by_label("Restore this version (Undo brings back what you had)").count(), 1);
+}
+
+#[test]
+fn checkpoints_wait_while_the_history_is_offline() {
+    let dir = tempfile::tempdir().unwrap();
+    let ctx = egui::Context::default();
+    let mut app = app_with_doc(dir.path());
+    app.run("file.versions.save", json!({"message": "named"})).unwrap();
+    let away = dir.path().join("usb");
+    app.run("file.versions.move", json!({"dir": away.display().to_string()})).unwrap();
+    super::tick(&mut app, &ctx);
+    app.run("image.adjustments.invert", json!({})).unwrap();
+    let out = dir.path().join("usb-out");
+    std::fs::rename(&away, &out).unwrap();
+    fire(&mut app, &ctx);
+    assert!(!app.ui.status_error, "no error every few minutes: {}", app.ui.status);
+    assert!(!away.exists());
+    // Back online: the change is still due.
+    std::fs::rename(&out, &away).unwrap();
+    fire(&mut app, &ctx);
+    assert_eq!(listed(&mut app), vec![("Auto-saved".into(), true), ("named".into(), false)]);
 }

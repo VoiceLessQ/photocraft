@@ -14,15 +14,15 @@ use gix::refs::{FullName, Target};
 use crate::{Error, History, Result, Saved, Version, check_name};
 
 /// The bare repository inside the history folder.
-const REPO: &str = "history.git";
+pub(crate) const REPO: &str = "history.git";
 /// File in the repository that marks it as PhotoCraft's (others are never written to).
-const MARKER: &str = "photocraft-versions";
+pub(crate) const MARKER: &str = "photocraft-versions";
 /// Held in the repository for a whole save, so two windows can't interleave.
-const REPO_LOCK: &str = "photocraft-versions.lock";
+pub(crate) const REPO_LOCK: &str = "photocraft-versions.lock";
 /// The bundle's own lock, the one `photocraft-format` holds while it saves.
 const SAVE_LOCK: &str = "save.lock";
 const LOCK_WAIT: Duration = if cfg!(test) { Duration::from_millis(200) } else { Duration::from_secs(10) };
-const MAX_DEPTH: usize = 32;
+pub(crate) const MAX_DEPTH: usize = 32;
 /// Commits walked at most when listing or checking a version id.
 const MAX_WALK: usize = 100_000;
 /// Longest version message kept, in bytes.
@@ -75,7 +75,7 @@ impl<T, E: std::error::Error + 'static> GitResult<T> for std::result::Result<T, 
 }
 
 /// Take an OS file lock, waiting up to [`LOCK_WAIT`]. `None` where the file system has no locks.
-fn lock(path: &Path, what: &str) -> Result<Option<File>> {
+pub(crate) fn lock(path: &Path, what: &str) -> Result<Option<File>> {
     let file = OpenOptions::new().read(true).write(true).create(true).truncate(false).open(path)?;
     let start = Instant::now();
     loop {
@@ -88,13 +88,13 @@ fn lock(path: &Path, what: &str) -> Result<Option<File>> {
     }
 }
 
-fn sync_file(path: &Path) -> Result<()> {
+pub(crate) fn sync_file(path: &Path) -> Result<()> {
     File::open(path)?.sync_all()?;
     Ok(())
 }
 
 /// Flush a folder's entries. Windows can't open folders for this and journals them itself.
-fn sync_dir(path: &Path) -> Result<()> {
+pub(crate) fn sync_dir(path: &Path) -> Result<()> {
     #[cfg(unix)]
     sync_file(path)?;
     #[cfg(not(unix))]
@@ -106,9 +106,11 @@ fn open_isolated(path: &Path) -> Result<gix::Repository> {
     gix::open_opts(path, gix::open::Options::isolated()).git()
 }
 
-/// Open the history's repository; create it (atomically, marked as ours) when `create`.
-fn open(h: &History, create: bool) -> Result<Option<gix::Repository>> {
+/// Open the history's repository; create it (atomically, marked as ours) when `create`. A linked
+/// history is never created: where it is missing, the drive is offline or the folder was emptied.
+pub(crate) fn open(h: &History, create: bool) -> Result<Option<gix::Repository>> {
     let repo_dir = h.dir.join(REPO);
+    h.check_link()?;
     if repo_dir.exists() {
         if !repo_dir.join(MARKER).is_file() {
             return Err(Error::ForeignRepository(repo_dir));

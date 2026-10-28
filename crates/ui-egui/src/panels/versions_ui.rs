@@ -8,6 +8,10 @@
 //! Checkpoints ([`tick`], [`saved`]): Preferences › File Handling saves one of each changed
 //! document every few minutes and on File › Save, in the background, once the document has a
 //! version. They are listed with the rest, dimmed.
+//!
+//! The footer says where the versions are kept and moves them (`file.versions.move`, to a folder
+//! the person picks, or back beside the file). When that folder's drive is disconnected the panel
+//! and the chip say so and offer Find History Folder… (`file.versions.link`).
 
 use std::collections::HashMap;
 
@@ -33,9 +37,11 @@ struct Row {
     checkpoint: bool,
 }
 
-/// Checkpoint bookkeeping (not serialised).
+/// Checkpoint and listing bookkeeping (not serialised).
 #[derive(Debug, Default)]
 pub struct Auto {
+    /// Bumped by [`forget`]: a listing read before it is read again.
+    generation: u64,
     /// When the timer fires next (`gpu_canvas::now_ms`); 0 = not armed.
     next_ms: f64,
     /// Each open document's revision at its last checkpoint, or when it was first seen.
@@ -48,8 +54,14 @@ pub struct Auto {
 #[derive(Clone, Debug)]
 struct Listing {
     path: String,
+    generation: u64,
     rows: Vec<Row>,
     error: Option<String>,
+    /// Where the versions are kept, and whether a link file put them there.
+    history: String,
+    linked: bool,
+    /// The linked folder can't be reached.
+    offline: bool,
 }
 
 fn listing_id() -> egui::Id {
@@ -79,21 +91,30 @@ fn rows(v: &Value) -> Vec<Row> {
 
 /// The active document's listing: cached, read again when its path changed or after `forget`.
 fn listing(app: &mut PhotocraftApp, ctx: &egui::Context, path: &str) -> Listing {
-    if let Some(cached) = ctx.data(|d| d.get_temp::<Listing>(listing_id())).filter(|l| l.path == path) {
+    let generation = app.versions.generation;
+    if let Some(cached) = ctx.data(|d| d.get_temp::<Listing>(listing_id())).filter(|l| l.path == path && l.generation == generation) {
         return cached;
     }
     // A read-only query drawn with the status bar: straight to the session, so it leaves the
     // status line, the views and the last-command record alone (`app.run` updates all three).
+    let empty = Listing { path: path.to_owned(), generation, rows: Vec::new(), error: None, history: String::new(), linked: false, offline: false };
     let fresh = match app.session.execute("file.versions.list", json!({})) {
-        Ok(v) => Listing { path: path.to_owned(), rows: rows(&v), error: None },
-        Err(e) => Listing { path: path.to_owned(), rows: Vec::new(), error: Some(e.to_string()) },
+        Ok(v) => Listing {
+            rows: rows(&v),
+            history: v.get("history").and_then(Value::as_str).unwrap_or_default().to_owned(),
+            linked: v.get("linked").and_then(Value::as_bool).unwrap_or(false),
+            offline: v.get("offline").and_then(Value::as_bool).unwrap_or(false),
+            ..empty
+        },
+        Err(e) => Listing { error: Some(e.to_string()), ..empty },
     };
     ctx.data_mut(|d| d.insert_temp(listing_id(), fresh.clone()));
     fresh
 }
 
-fn forget(ctx: &egui::Context) {
-    ctx.data_mut(|d| d.remove::<Listing>(listing_id()));
+/// Read the list again on next use (after a save, a restore, a move).
+fn forget(app: &mut PhotocraftApp) {
+    app.versions.generation = app.versions.generation.wrapping_add(1);
 }
 
 fn now() -> Option<i64> {
@@ -135,9 +156,9 @@ fn saved_message(v: &Value) -> String {
 }
 
 /// Save a version; true when one was made or is being saved in the background.
-fn save(app: &mut PhotocraftApp, ctx: &egui::Context, note: &str) -> bool {
+fn save(app: &mut PhotocraftApp, note: &str) -> bool {
     let r = app.run(vcs_cmds::SAVE, json!({"message": note}));
-    forget(ctx);
+    forget(app);
     // In the background the result comes to `on_job_event`.
     if r.as_ref().is_ok_and(|v| v["pending"] == true) {
         report(app, Ok(tl!("Saving a version…").to_owned()));
@@ -146,6 +167,87 @@ fn save(app: &mut PhotocraftApp, ctx: &egui::Context, note: &str) -> bool {
     let saved = r.as_ref().is_ok_and(|v| v["created"] == true);
     report(app, r.map(|v| saved_message(&v)));
     saved
+}
+
+const MOVE: &str = "file.versions.move";
+
+fn moved_message(v: &Value) -> String {
+    let history = v.get("history").and_then(Value::as_str).unwrap_or_default();
+    match v.get("leftover").and_then(Value::as_str) {
+        Some(old) => crate::i18n::fmt(tl!("Versions moved to {dir}; the old copy in {old} could not be deleted"), &[("dir", history), ("old", old)]),
+        None => crate::i18n::fmt(tl!("Versions moved to {dir}"), &[("dir", history)]),
+    }
+}
+
+/// Move the versions into `dir`, in the background where jobs run there.
+fn start_move(app: &mut PhotocraftApp, dir: &str) {
+    let r = app.run(MOVE, json!({"dir": dir}));
+    forget(app);
+    match r {
+        Ok(v) if v["pending"] == true => report(app, Ok(tl!("Moving the versions…").to_owned())),
+        r => report(app, r.map(|v| moved_message(&v))),
+    }
+}
+
+fn ask_move(app: &mut PhotocraftApp) {
+    let asked = app.ask_folder(|app, dir| {
+        start_move(app, &dir);
+        Ok(Value::Null)
+    });
+    if let Err(e) = asked {
+        report(app, Err(e));
+    }
+}
+
+fn move_back(app: &mut PhotocraftApp) {
+    match app.session.execute("file.versions.location", json!({})) {
+        Ok(v) => match v.get("default").and_then(Value::as_str) {
+            Some(home) => start_move(app, home),
+            None => report(app, Err(tl!("No folder to move the versions back to").to_owned())),
+        },
+        Err(e) => report(app, Err(e.to_string())),
+    }
+}
+
+/// Point the folder at a history picked on disk (the folder or the history moved).
+fn find(app: &mut PhotocraftApp, dir: &str) {
+    let r = app.run("file.versions.link", json!({"dir": dir}));
+    forget(app);
+    report(app, r.map(|v| crate::i18n::fmt(tl!("Using the versions in {dir}"), &[("dir", v.get("history").and_then(Value::as_str).unwrap_or(dir))])));
+}
+
+fn ask_find(app: &mut PhotocraftApp) {
+    let asked = app.ask_folder(|app, dir| {
+        find(app, &dir);
+        Ok(Value::Null)
+    });
+    if let Err(e) = asked {
+        report(app, Err(e));
+    }
+}
+
+/// Where the versions are kept, with Move… (and Move Back when they are elsewhere).
+fn footer(app: &mut PhotocraftApp, ui: &mut egui::Ui, t: &Tokens, listing: &Listing) {
+    let h = widgets::button_height(ui.ctx());
+    let (mut to_move, mut back) = (false, false);
+    // A fixed height: a bare right-to-left layout would take the whole panel height.
+    ui.allocate_ui_with_layout(vec2(ui.available_width(), h + 2.0), egui::Layout::right_to_left(egui::Align::Center), |ui| {
+        to_move = widgets::compact_button(ui, tl!("Move…"), h)
+            .on_hover_text(tl!("Keep this folder's versions in another folder, for example on another drive"))
+            .clicked();
+        if listing.linked {
+            back = widgets::compact_button(ui, tl!("Move Back"), h).on_hover_text(tl!("Keep the versions beside the file again")).clicked();
+        }
+        // The folder's name: a long path cut at its end would hide it. The tooltip has the path.
+        let name = std::path::Path::new(&listing.history).file_name().and_then(|n| n.to_str()).unwrap_or(&listing.history);
+        let place = if listing.linked { crate::i18n::fmt(tl!("Kept in {dir}"), &[("dir", name)]) } else { tl!("Kept beside the file").to_owned() };
+        ui.add(egui::Label::new(RichText::new(place).color(t.text_faint).size(11.0)).truncate()).on_hover_text(&listing.history);
+    });
+    if to_move {
+        ask_move(app);
+    } else if back {
+        move_back(app);
+    }
 }
 
 /// Message of a checkpoint saved by the timer.
@@ -223,15 +325,25 @@ pub(crate) fn is_checkpoint(app: &PhotocraftApp, job: JobId) -> bool {
 }
 
 /// A version save that ran in the background ended. True when it was one (the event is handled).
-pub(crate) fn on_job_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: &JobEvent) -> bool {
+pub(crate) fn on_job_event(app: &mut PhotocraftApp, e: &JobEvent) -> bool {
+    if e.command == MOVE {
+        forget(app);
+        match &e.outcome {
+            JobOutcome::Done(v) => report(app, Ok(moved_message(v))),
+            JobOutcome::Failed(err) => report(app, Err(err.clone())),
+            JobOutcome::Cancelled => report(app, Ok(crate::i18n::fmt(tl!("Cancelled {label}"), &[("label", &e.label)]))),
+        }
+        return true;
+    }
     if e.command != vcs_cmds::SAVE {
         return false;
     }
-    forget(ctx);
+    forget(app);
     if let Some(i) = app.versions.pending.iter().position(|(j, _, _)| *j == e.id) {
         let (_, doc, rev) = app.versions.pending.remove(i);
         match &e.outcome {
-            // Quiet: the chip's count is the only sign.
+            // Quiet: the chip's count is the only sign. Skipped while offline: it waits.
+            JobOutcome::Done(v) if v["offline"] == true => {}
             JobOutcome::Done(_) => {
                 app.versions.seen.insert(doc, rev);
             }
@@ -248,9 +360,9 @@ pub(crate) fn on_job_event(app: &mut PhotocraftApp, ctx: &egui::Context, e: &Job
     true
 }
 
-fn restore(app: &mut PhotocraftApp, ctx: &egui::Context, row: &Row) {
+fn restore(app: &mut PhotocraftApp, row: &Row) {
     let r = app.run("file.versions.restore", json!({"id": row.id}));
-    forget(ctx);
+    forget(app);
     let msg = r.map(|_| crate::i18n::fmt(tl!("Restored “{name}” (Undo brings back what you had)"), &[("name", &row.message)]));
     report(app, msg);
 }
@@ -286,6 +398,19 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         return;
     };
     let ctx = ui.ctx().clone();
+    let listing = listing(app, &ctx, &path);
+    if listing.offline {
+        let text = crate::i18n::fmt(
+            tl!("The versions are kept in {dir}, which can't be reached. Connect its drive, or find the folder if it moved."),
+            &[("dir", &listing.history)],
+        );
+        ui.add(egui::Label::new(RichText::new(text).color(t.warning).size(11.5)).wrap());
+        ui.add_space(4.0);
+        if widgets::secondary_button(ui, tl!("Find History Folder…"), 0.0).clicked() {
+            ask_find(app);
+        }
+        return;
+    }
 
     let mut note = ui.data(|d| d.get_temp::<String>(note_id())).unwrap_or_default();
     let mut do_save = false;
@@ -299,25 +424,29 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
         let field = widgets::text_field(ui, note_id().with("field"), &mut note, tl!("What changed?"), w, false).accessible_name(tl!("Version note"));
         do_save |= field.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
     });
-    if do_save && save(app, &ctx, &note) {
+    if do_save && save(app, &note) {
         note.clear();
     }
     ui.data_mut(|d| d.insert_temp(note_id(), note));
     ui.add_space(4.0);
 
-    let listing = listing(app, &ctx, &path);
+    let listing = self::listing(app, &ctx, &path);
     if let Some(e) = &listing.error {
         ui.add(egui::Label::new(RichText::new(e).color(t.warning).size(11.5)).wrap());
         return;
     }
     if listing.rows.is_empty() {
         faint(ui, &t, tl!("No versions yet. Save one to start the history; your file stays as it is."));
+        ui.add_space(4.0);
+        footer(app, ui, &t, &listing);
         return;
     }
     let now = now();
     let row_h = 38.0;
     let mut chosen: Option<Row> = None;
-    let max_h = (ui.available_height() - 4.0).clamp(80.0, 420.0);
+    // Room for the footer below the list.
+    let footer_h = widgets::button_height(ui.ctx()) + 8.0;
+    let max_h = (ui.available_height() - footer_h - 4.0).clamp(80.0, 420.0);
     egui::ScrollArea::vertical().id_salt("versions-rows").max_height(max_h).auto_shrink([false, true]).show(ui, |ui| {
         for (i, row) in listing.rows.iter().enumerate() {
             let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), row_h), Sense::hover());
@@ -348,8 +477,10 @@ pub fn panel(app: &mut PhotocraftApp, ui: &mut egui::Ui) {
             ui.painter().line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0, t.separator));
         }
     });
+    ui.add_space(4.0);
+    footer(app, ui, &t, &listing);
     if let Some(row) = chosen {
-        restore(app, &ctx, &row);
+        restore(app, &row);
     }
 }
 
@@ -360,9 +491,16 @@ pub(crate) fn status_chip(app: &mut PhotocraftApp, ui: &mut egui::Ui, height: f3
     }
     let Some(path) = app.session.active().and_then(|d| d.path.clone()) else { return };
     let ctx = ui.ctx().clone();
-    let n = listing(app, &ctx, &path).rows.len();
-    let text = if n == 0 { tl!("Versions").to_owned() } else { crate::i18n::trn(crate::i18n::current(), n as u64, "{n} version", "{n} versions") };
-    if widgets::compact_button(ui, &text, height).on_hover_text(tl!("Open the Versions panel")).clicked() {
+    let listing = listing(app, &ctx, &path);
+    let n = listing.rows.len();
+    let (text, tip) = if listing.offline {
+        (tl!("History offline").to_owned(), tl!("The drive holding this folder's versions is not connected"))
+    } else if n == 0 {
+        (tl!("Versions").to_owned(), tl!("Open the Versions panel"))
+    } else {
+        (crate::i18n::trn(crate::i18n::current(), n as u64, "{n} version", "{n} versions"), tl!("Open the Versions panel"))
+    };
+    if widgets::compact_button(ui, &text, height).on_hover_text(tip).clicked() {
         open(app);
     }
 }

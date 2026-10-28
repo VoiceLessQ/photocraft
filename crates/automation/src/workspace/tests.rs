@@ -264,6 +264,9 @@ fn filesystem_commands_fail_closed() {
         "file.versions.save",
         "file.versions.list",
         "file.versions.restore",
+        "file.versions.location",
+        "file.versions.move",
+        "file.versions.link",
     ] {
         assert!(authorize_engine_command(id, &serde_json::json!({})).is_err());
     }
